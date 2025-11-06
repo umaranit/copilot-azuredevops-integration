@@ -22,10 +22,14 @@ AI-powered backlog analysis using GitHub Copilot CLI integrated with Azure DevOp
 
 ## 🚀 **Setup Instructions**
 
-### **Step 1: Create Variable Group**
+### **Step 1: Add Pipeline Files to Your Repository**
+1. **Clone or download** this repository 
+2. **Copy these files** to your Azure DevOps repository:
+   - `backlog-analyzer.yml` (main pipeline)
+   - `templates/` folder (reusable components)
+3. **Commit and push** the files to your repository
 
-
-
+### **Step 2: Create Variable Group**
 1. Go to your Azure DevOps project
 2. Navigate to **Pipelines** → **Library** → **Variable groups**
 3. Click **+ Variable group**
@@ -33,14 +37,14 @@ AI-powered backlog analysis using GitHub Copilot CLI integrated with Azure DevOp
 5. Add variable: `GITHUB_TOKEN` with your [GitHub Personal Access Token](Refer  https://github.com/github/copilot-cli for creating token)
 6. Save the variable group
 
-### **Step 2: Create Pipeline**
+### **Step 3: Create Pipeline**
 1. Go to **Pipelines** → **Pipelines** → **New pipeline**
 2. Choose **Azure Repos Git** (or your preferred source)
 3. Select **Existing Azure Pipelines YAML file**
 4. Choose `backlog-analyzer.yml`
 5. **Save & Run**
 
-### **Step 3: Configure & Run**
+### **Step 4: Configure & Run**
 Set these parameters when running:
 - **Project Name**: Your Azure DevOps project name
 - **Items to Analyze**: Start with 5-10 for testing
