@@ -20,18 +20,32 @@ AI-powered backlog analysis using GitHub Copilot CLI integrated with Azure DevOp
 - **Team scalability**: One pipeline serves entire development team
 - **Measurable outcomes**: Generate reports showing tangible quality improvements
 
-## 🚀 **2-Minute Setup**
+## 🚀 **Setup Instructions**
 
-### **Option 1: Automated Setup**
-```powershell
-# Run this command and you're done!
-.\setup\deploy.ps1 -Organization "yourorg" -Project "yourproject" -GitHubToken "ghp_xxxx"
-```
+### **Step 1: Create Variable Group**
 
-### **Option 2: Manual Setup**
-1. **Create variable group** in Azure DevOps: `copilot-credentials` with `GITHUB_TOKEN`
-2. **Import pipeline**: Upload `backlog-analyzer.yml` to Azure DevOps
-3. **Run pipeline**: Set your project name and go!
+
+
+1. Go to your Azure DevOps project
+2. Navigate to **Pipelines** → **Library** → **Variable groups**
+3. Click **+ Variable group**
+4. Name: `copilot-credentials`
+5. Add variable: `GITHUB_TOKEN` with your [GitHub Personal Access Token](Refer  https://github.com/github/copilot-cli for creating token)
+6. Save the variable group
+
+### **Step 2: Create Pipeline**
+1. Go to **Pipelines** → **Pipelines** → **New pipeline**
+2. Choose **Azure Repos Git** (or your preferred source)
+3. Select **Existing Azure Pipelines YAML file**
+4. Choose `backlog-analyzer.yml`
+5. **Save & Run**
+
+### **Step 3: Configure & Run**
+Set these parameters when running:
+- **Project Name**: Your Azure DevOps project name
+- **Items to Analyze**: Start with 5-10 for testing
+- **Analysis Mode**: `standard` (recommended)
+- **Work Item Types**: `User Story,Product Backlog Item`
 
 ## 🎯 **What You Get**
 
@@ -62,16 +76,7 @@ AI-powered backlog analysis using GitHub Copilot CLI integrated with Azure DevOp
 - ❌ Small: Consider splitting into smaller stories
 - ✅ Testable: Clear test scenarios defined
 
-### 🎯 Top Recommendations
-1. Split into: "Login UI", "Auth API", "Password Reset"
-2. Add specific performance requirements (< 2sec login)
-3. Include security testing scenarios
 
-### 🔧 Technical Implementation
-- **Architecture**: OAuth 2.0 + JWT tokens recommended
-- **Security**: Rate limiting, secure password storage required
-- **Testing**: Unit tests, integration tests, security scanning
-```
 
 ## ⚙️ **Customization Options**
 
