@@ -22,15 +22,10 @@ parameters:
       - 'standard'   # Full INVEST analysis
       - 'detailed'   # Comprehensive with recommendations
   
-  - name: projectName
-    displayName: 'Azure DevOps Project Name'
-    type: string
-    default: 'Parts Unlimited'
-  
   - name: workItemTypes
     displayName: 'Work Item Types to Analyze'
     type: string
-    default: 'User Story,Product Backlog Item'
+    default: 'Product Backlog Item'
 
 pool:
   vmImage: 'ubuntu-latest'
@@ -44,8 +39,8 @@ stages:
     steps:
     - template: templates/setup-copilot.yml
       parameters:
-        validateGitHubToken: true
-        installAdditionalTools: true
+        nodeVersion: '22'
+        maxRetries: 3
 
 - stage: FetchWorkItems
   displayName: '📋 Fetch Work Items'
@@ -56,18 +51,10 @@ stages:
     steps:
     - template: templates/fetch-workitems.yml
       parameters:
-        queryType: 'backlog'
-        projectName: '${{ parameters.projectName }}'
-        additionalFilters: 'AND [System.WorkItemType] IN (${{ parameters.workItemTypes }})'
-        includeFields:
-          - 'System.Title'
-          - 'System.Description' 
-          - 'System.AcceptanceCriteria'
-          - 'System.State'
-          - 'Microsoft.VSTS.Common.Priority'
-          - 'Microsoft.VSTS.Scheduling.StoryPoints'
-        fetchDetails: true
+        projectName: '$(System.TeamProject)'
+        workItemTypes: '${{ parameters.workItemTypes }}'
         maxItems: ${{ parameters.analyzeTop }}
+        queryType: 'backlog'
 
 - stage: AnalyzeWithCopilot
   displayName: '🤖 AI Analysis with Copilot'
@@ -76,6 +63,12 @@ stages:
   - job: BacklogAnalysis
     displayName: 'Analyze Backlog Quality with Copilot'
     steps:
+    - task: DownloadBuildArtifacts@1
+      displayName: 'Download Work Items Data'
+      inputs:
+        buildType: 'current'
+        artifactName: 'workitems-data'
+        downloadPath: '$(Agent.TempDirectory)'
     - template: templates/ai-analysis.yml
       parameters:
         analysisMode: '${{ parameters.analysisMode }}'
@@ -88,6 +81,18 @@ stages:
   - job: GenerateReports
     displayName: 'Generate Analysis Reports'
     steps:
+    - task: DownloadBuildArtifacts@1
+      displayName: 'Download Work Items Data'
+      inputs:
+        buildType: 'current'
+        artifactName: 'workitems-data'
+        downloadPath: '$(Agent.TempDirectory)'
+    - task: DownloadBuildArtifacts@1
+      displayName: 'Download Analysis Report'
+      inputs:
+        buildType: 'current'
+        artifactName: 'analysis-report'
+        downloadPath: '$(Agent.TempDirectory)'
     - template: templates/reporting.yml
       parameters:
         reportType: 'comprehensive'
