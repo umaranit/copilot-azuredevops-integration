@@ -86,7 +86,7 @@ steps:
     GITHUB_TOKEN: $(GITHUB_TOKEN)
 
 - script: |
-    echo "🤖 AI Analysis with Copilot (Template v1.1)"
+    echo "🤖 AI Analysis with Copilot (Template v1.2)"
     echo "Analysis Mode: ${{ parameters.analysisMode }}"
     echo "Analysis Type: ${{ parameters.analysisType }}"
     
@@ -94,35 +94,26 @@ steps:
     export GITHUB_TOKEN="$(GITHUB_TOKEN)"
     export GH_TOKEN="$(GITHUB_TOKEN)"
     
-    # Define analysis prompts based on mode and type
-    get_analysis_prompt() {
-      local mode="$1"
-      local type="$2"
-      
-      case "${type}_${mode}" in
-        "backlog_basic")
-          echo "Briefly analyze this work item for quality (1-10 score) and list 2 key issues:"
-          ;;
-        "backlog_standard")
-          echo "Analyze this work item using INVEST principles. Provide: 1) Overall score (1-10), 2) INVEST compliance, 3) Top 3 issues, 4) One key recommendation:"
-          ;;
-        "sprint_standard")
-          echo "Analyze this work item for sprint readiness. Provide: 1) Readiness score (1-10), 2) Definition of Done compliance, 3) Blockers/dependencies, 4) Sprint planning recommendations:"
-          ;;
-        "release_standard")
-          echo "Analyze this work item for release readiness. Provide: 1) Release readiness score (1-10), 2) Quality gates status, 3) Risk assessment, 4) Go/No-go recommendation:"
-          ;;
-        "backlog_detailed")
-          echo "Comprehensive backlog analysis of this work item. Provide: 1) Quality score (1-10), 2) INVEST principle breakdown, 3) Detailed issues list, 4) Specific recommendations, 5) Risk assessment:"
-          ;;
-        *)
-          echo "Analyze this work item and provide improvement recommendations:"
-          ;;
-      esac
-    }
+    # Verify token is set
+    if [ -z "$GITHUB_TOKEN" ]; then
+      echo "❌ ERROR: GITHUB_TOKEN is not set!"
+      exit 1
+    fi
     
-    ANALYSIS_PROMPT=$(get_analysis_prompt "${{ parameters.analysisMode }}" "${{ parameters.analysisType }}")
-    echo "📝 Using prompt: $ANALYSIS_PROMPT"
+    echo "✅ GITHUB_TOKEN is set"
+    
+    # Test Copilot is working first
+    echo "Testing Copilot..."
+    TEST_RESULT=$(echo "Say 'working'" | timeout 10 copilot 2>&1)
+    TEST_EXIT=$?
+    
+    if [ $TEST_EXIT -ne 0 ]; then
+      echo "❌ ERROR: Copilot test failed (exit code: $TEST_EXIT)"
+      echo "Response: $TEST_RESULT"
+      exit 1
+    fi
+    
+    echo "✅ Copilot test passed"
     
     # Initialize report
     REPORT_FILE="$(Agent.TempDirectory)/analysis-report.md"
@@ -145,87 +136,81 @@ steps:
       PROCESSED=0
       FAILED=0
       
-      # Check if we have any work items to process
-      if [ "$TOTAL_ITEMS" -gt 0 ]; then
-        # Process each work item
-        for i in $(seq 0 $((TOTAL_ITEMS - 1))); do
-          ITEM=$(cat "$WORKITEMS_FILE" | jq ".value[$i]")
-          ID=$(echo "$ITEM" | jq -r '.id')
-          TITLE=$(echo "$ITEM" | jq -r '.fields."System.Title" // "No Title"')
-          TYPE=$(echo "$ITEM" | jq -r '.fields."System.WorkItemType" // "Unknown"')
-          DESCRIPTION=$(echo "$ITEM" | jq -r '.fields."System.Description" // ""')
-          
-          # Perform Copilot analysis with timeout
-          echo "🔍 Analyzing Work Item $ID: $TITLE"
-          
-          # Create analysis input
-          ANALYSIS_INPUT="Work Item ID: $ID
-    Title: $TITLE
-    Type: $TYPE
-    Description: $DESCRIPTION
-    
-    $ANALYSIS_PROMPT"
-          
-          # Perform Copilot analysis with timeout and better error handling
-          echo "📝 Sending analysis request to Copilot..."
-          if echo "$ANALYSIS_INPUT" | timeout 60 copilot > "analysis_$ID.md" 2>"analysis_error_$ID.log"; then
-            echo "✅ Analysis completed for Work Item $ID"
-            
-            # Add to report
-            echo "## 📋 Work Item #$ID: $TITLE" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            echo "**Type:** $TYPE" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            cat "analysis_$ID.md" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            echo "---" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            
-            PROCESSED=$((PROCESSED + 1))
-          else
-            echo "❌ Analysis failed for Work Item $ID"
-            echo "Error details:"
-            if [ -f "analysis_error_$ID.log" ]; then
-              cat "analysis_error_$ID.log"
-            else
-              echo "No error log available"
-            fi
-            
-            # Add failed item to report for visibility
-            echo "## ❌ Work Item #$ID: $TITLE (Analysis Failed)" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            echo "**Type:** $TYPE" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            echo "**Status:** Analysis failed - please check logs" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            echo "---" >> "$REPORT_FILE"
-            echo "" >> "$REPORT_FILE"
-            
-            FAILED=$((FAILED + 1))
-          fi
-          
-          # Rate limiting
-          sleep 2
-        done
+      # Process each work item with simple approach
+      for i in $(seq 0 $((TOTAL_ITEMS - 1))); do
+        # Get work item at index i
+        ITEM=$(cat "$WORKITEMS_FILE" | jq -c ".value[$i]")
         
-        echo "🎉 Analysis complete: $PROCESSED/$TOTAL_ITEMS items processed"
-      else
-        echo "⚠️ No work items found for analysis"
-        echo "📄 Creating empty analysis report..."
+        if [ "$ITEM" = "null" ] || [ -z "$ITEM" ]; then
+          echo "No more items to process"
+          break
+        fi
         
-        # Add a message for empty results
-        echo "## 🔍 Analysis Results" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
-        echo "**No work items found matching the specified criteria.**" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
-        echo "This could be due to:" >> "$REPORT_FILE"
-        echo "- No work items of the specified types exist in the project" >> "$REPORT_FILE"
-        echo "- The query filters are too restrictive" >> "$REPORT_FILE"
-        echo "- The work item types don't match the project template" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
-        echo "Consider adjusting the work item types or query parameters." >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
-      fi
+        # Extract fields safely
+        ID=$(echo "$ITEM" | jq -r '.id')
+        TITLE=$(echo "$ITEM" | jq -r '.fields."System.Title" // "No Title"' | sed 's/["`]//g' | head -c 100)
+        TYPE=$(echo "$ITEM" | jq -r '.fields."System.WorkItemType" // "Unknown"')
+        DESCRIPTION=$(echo "$ITEM" | jq -r '.fields."System.Description" // ""' | sed 's/<[^>]*>//g' | head -c 200 | sed 's/["`]//g')
+        
+        echo "🔍 Analyzing Work Item $ID: $TITLE"
+        
+        # Create simple prompt based on analysis mode
+        case "${{ parameters.analysisMode }}" in
+          "basic")
+            PROMPT="Analyze this work item for quality (1-10 score) and list 2 key issues: Title: $TITLE. Description: $DESCRIPTION."
+            ;;
+          "detailed")
+            PROMPT="Comprehensive analysis of this work item. Provide: 1) Quality score (1-10), 2) INVEST principle breakdown, 3) Detailed issues list, 4) Specific recommendations: Title: $TITLE. Description: $DESCRIPTION."
+            ;;
+          *)
+            PROMPT="Analyze this work item using INVEST principles. Provide: 1) Overall score (1-10), 2) INVEST compliance, 3) Top 3 issues, 4) One key recommendation: Title: $TITLE. Description: $DESCRIPTION."
+            ;;
+        esac
+        
+        # Call Copilot with proper error handling
+        echo "📝 Sending analysis request to Copilot..."
+        ANALYSIS=$(echo "$PROMPT" | timeout 60 copilot 2>&1)
+        COPILOT_EXIT=$?
+        
+        if [ $COPILOT_EXIT -eq 124 ]; then
+          echo "❌ Analysis timeout for Work Item $ID"
+          FAILED=$((FAILED + 1))
+        elif [ $COPILOT_EXIT -ne 0 ]; then
+          echo "❌ Analysis failed for Work Item $ID (exit: $COPILOT_EXIT)"
+          echo "Response: $ANALYSIS"
+          FAILED=$((FAILED + 1))
+        else
+          echo "✅ Analysis completed for Work Item $ID"
+          PROCESSED=$((PROCESSED + 1))
+          
+          # Add to report
+          echo "## 📋 Work Item #$ID: $TITLE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "**Type:** $TYPE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "$ANALYSIS" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "---" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+        fi
+        
+        # Add failed items to report for visibility
+        if [ $COPILOT_EXIT -ne 0 ]; then
+          echo "## ❌ Work Item #$ID: $TITLE (Analysis Failed)" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "**Type:** $TYPE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "**Status:** Analysis failed - timeout or error" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "---" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+        fi
+        
+        # Rate limiting
+        sleep 2
+      done
+      
+      echo "🎉 Analysis complete: $PROCESSED/$TOTAL_ITEMS items processed"
       
       # Add summary
       echo "## 📊 Analysis Summary" >> "$REPORT_FILE"
@@ -238,22 +223,12 @@ steps:
       echo "❌ No work items data file found"
       echo "📄 Creating minimal analysis report..."
       
-      # Create a basic report even when no data file exists
       echo "## 🔍 Analysis Results" >> "$REPORT_FILE"
       echo "" >> "$REPORT_FILE"
       echo "**No work items data file was found.**" >> "$REPORT_FILE"
       echo "" >> "$REPORT_FILE"
       echo "This indicates an issue with the previous fetch stage." >> "$REPORT_FILE"
-      echo "Please check the fetch work items stage for errors." >> "$REPORT_FILE"
       echo "" >> "$REPORT_FILE"
-      echo "## 📊 Analysis Summary" >> "$REPORT_FILE"
-      echo "" >> "$REPORT_FILE"
-      echo "- **Total Items:** 0" >> "$REPORT_FILE"
-      echo "- **Successfully Analyzed:** 0" >> "$REPORT_FILE"
-      echo "- **Failed:** 0" >> "$REPORT_FILE"
-      echo "" >> "$REPORT_FILE"
-      
-      echo "⚠️ Continuing with empty report instead of failing"
     fi
   displayName: 'AI Analysis with Copilot'
   env:
