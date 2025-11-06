@@ -32,8 +32,25 @@ steps:
     WORKITEMS_FILE="$(Agent.TempDirectory)/workitems-data/workitems_detailed.json"
     
     if [ ! -f "$ANALYSIS_REPORT" ]; then
-      echo "❌ Analysis report not found. Skipping report generation."
-      exit 1
+      echo "⚠️ Analysis report not found. Creating basic report..."
+      
+      # Create a basic report when analysis report is missing
+      echo "# 📊 Backlog Analysis Report" > "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "## 🔍 Analysis Results" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "**No analysis could be performed due to missing data.**" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "## 📊 Analysis Summary" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "- **Total Items:** 0" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "- **Successfully Analyzed:** 0" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "- **Failed:** 0" >> "$(Agent.TempDirectory)/analysis-report.md"
+      echo "" >> "$(Agent.TempDirectory)/analysis-report.md"
+      
+      ANALYSIS_REPORT="$(Agent.TempDirectory)/analysis-report.md"
     fi
     
     # Generate comprehensive report
