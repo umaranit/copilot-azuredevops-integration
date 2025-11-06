@@ -1,0 +1,464 @@
+# Backlog Analyzer - AI-Powered Work Item Analysis
+# Analyzes Azure DevOps work items using GitHub Copilot CLI
+# Ready for any team/project with minimal configuration required
+
+trigger: none  # Manual trigger - teams can customize as needed
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+parameters:
+  # Core Parameters - Easy for teams to customize
+  - name: analyzeTop
+    displayName: 'Number of work items to analyze'
+    type: number
+    default: 10
+    values: [3, 5, 10, 15, 20, 25, 50]
+  
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'YourProject'  # Teams must customize this
+  
+  - name: workItemTypes
+    displayName: 'Work Item Types (comma-separated)'
+    type: string
+    default: 'User Story,Product Backlog Item'
+    values:
+      - 'User Story,Product Backlog Item'
+      - 'Epic,Feature'
+      - 'User Story,Task,Bug'
+      - 'Epic,Feature,User Story'
+  
+  - name: analysisMode
+    displayName: 'Analysis Focus'
+    type: string
+    default: 'Quality'
+    values:
+      - 'Quality'      # INVEST + quality scores
+      - 'Technical'    # Technical feasibility
+      - 'Business'     # Business value focus
+      - 'Comprehensive' # All aspects
+
+variables:
+  # Secure Variables - Must be configured via Variable Group
+  - group: 'copilot-credentials'  # Contains: GITHUB_TOKEN
+  
+  # Project Configuration - Auto-calculated from parameters
+  - name: PROJECT_NAME_ENCODED
+    value: ${{ replace(parameters.projectName, ' ', '%20') }}
+  
+  # Analysis Configuration
+  - name: BATCH_SIZE
+    value: 5  # Process items in batches for reliability
+  
+  # Timeout Configuration
+  - name: COPILOT_TIMEOUT
+    value: 60  # seconds per work item
+  - name: API_TIMEOUT
+    value: 30   # seconds per API call
+
+stages:
+# ==========================================
+# Stage 1: Environment Setup & Validation
+# ==========================================
+- stage: Setup
+  displayName: 'Setup & Validation'
+  jobs:
+  - job: PrepareEnvironment
+    displayName: 'Setup Analysis Environment'
+    steps:
+    
+    - script: |
+        echo "======================================="
+        echo "🤖 BACKLOG ANALYZER SETUP"
+        echo "======================================="
+        echo "Project: ${{ parameters.projectName }}"
+        echo "Work Items: ${{ parameters.analyzeTop }}"
+        echo "Types: ${{ parameters.workItemTypes }}"
+        echo "Analysis: ${{ parameters.analysisMode }}"
+        echo "======================================="
+      displayName: 'Display Configuration'
+    
+    - script: |
+        # Install Prerequisites
+        echo "📦 Installing Node.js and dependencies..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+        sudo apt-get update && sudo apt-get install -y nodejs jq curl
+        
+        # Verify installations
+        echo "✅ Node.js: $(node --version)"
+        echo "✅ npm: $(npm --version)"
+        echo "✅ jq: $(jq --version)"
+        
+        # Install GitHub Copilot CLI
+        echo "🤖 Installing GitHub Copilot CLI..."
+        sudo npm install -g @github/copilot
+        
+        # Verify Copilot CLI
+        if command -v copilot &> /dev/null; then
+            echo "✅ GitHub Copilot CLI installed successfully"
+        else
+            echo "❌ Copilot CLI installation failed"
+            exit 1
+        fi
+        
+      displayName: 'Install Prerequisites'
+    
+    - script: |
+        # Validate Authentication
+        export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+        export GH_TOKEN="$(GITHUB_TOKEN)"
+        
+        echo "🔐 Validating GitHub Copilot access..."
+        
+        # Check token presence
+        if [ -z "$GITHUB_TOKEN" ]; then
+          echo "❌ GITHUB_TOKEN not found in variable group 'copilot-credentials'"
+          echo "💡 Create variable group with your GitHub PAT"
+          exit 1
+        fi
+        
+        echo "✅ GitHub token found (length: ${#GITHUB_TOKEN})"
+        
+        # Test Copilot functionality
+        echo "🧪 Testing Copilot CLI..."
+        TEST_RESPONSE=$(echo "Respond with 'WORKING' in all caps" | timeout $(COPILOT_TIMEOUT) copilot 2>&1)
+        
+        if echo "$TEST_RESPONSE" | grep -q "WORKING"; then
+          echo "✅ Copilot CLI authentication successful"
+        else
+          echo "❌ Copilot authentication test failed"
+          echo "Response: $TEST_RESPONSE"
+          echo "💡 Check GitHub token permissions and Copilot access"
+          exit 1
+        fi
+        
+      displayName: 'Validate Authentication'
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+        GH_TOKEN: $(GITHUB_TOKEN)
+
+# ==========================================
+# Stage 2: Data Extraction
+# ==========================================
+- stage: ExtractData
+  displayName: 'Extract Work Items'
+  dependsOn: Setup
+  condition: succeeded()
+  jobs:
+  - job: FetchWorkItems
+    displayName: 'Fetch from Azure DevOps'
+    steps:
+    
+    - script: |
+        echo "🔍 Fetching work items from Azure DevOps..."
+        echo "Project: ${{ parameters.projectName }}"
+        echo "Types: ${{ parameters.workItemTypes }}"
+        
+        # Build WIQL query dynamically
+        WORK_ITEM_TYPES="${{ parameters.workItemTypes }}"
+        
+        # Convert comma-separated types to WIQL format
+        TYPES_ARRAY=$(echo "$WORK_ITEM_TYPES" | tr ',' '\n' | sed "s/^/'/;s/$/'/" | tr '\n' ',' | sed 's/,$//')
+        
+        # Create WIQL query
+        cat > query.json << EOF
+        {
+          "query": "SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.Description], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Scheduling.StoryPoints] FROM WorkItems WHERE [System.TeamProject] = '${{ parameters.projectName }}' AND [System.WorkItemType] IN ($TYPES_ARRAY) AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [Microsoft.VSTS.Common.Priority], [System.ChangedDate] DESC"
+        }
+        EOF
+        
+        echo "📝 WIQL Query created:"
+        cat query.json | jq .
+        
+      displayName: 'Prepare WIQL Query'
+    
+    - script: |
+        # Execute WIQL query
+        echo "🌐 Executing WIQL query..."
+        
+        curl -s -X POST \
+             -H "Authorization: Bearer $(System.AccessToken)" \
+             -H "Content-Type: application/json" \
+             -d @query.json \
+             "$(System.CollectionUri)$(PROJECT_NAME_ENCODED)/_apis/wit/wiql?api-version=7.0" \
+             -o workitem_ids.json \
+             --max-time $(API_TIMEOUT)
+        
+        if [ $? -ne 0 ]; then
+          echo "❌ WIQL query failed"
+          exit 1
+        fi
+        
+        # Extract work item IDs (limited by analyzeTop parameter)
+        IDS=$(cat workitem_ids.json | jq -r ".workItems[:${{ parameters.analyzeTop }}] | map(.id) | join(\",\")")
+        
+        if [ -z "$IDS" ] || [ "$IDS" = "null" ]; then
+          echo "⚠️ No work items found matching criteria"
+          echo "💡 Check project name, work item types, or query filters"
+          
+          # Create empty results for graceful handling
+          echo '{"value":[]}' > workitems_detailed.json
+        else
+          echo "📋 Found work items: $IDS"
+          
+          # Fetch detailed work item data
+          echo "📥 Fetching detailed work item information..."
+          curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+               "$(System.CollectionUri)$(PROJECT_NAME_ENCODED)/_apis/wit/workitems?ids=$IDS&\$expand=all&api-version=7.0" \
+               -o workitems_detailed.json \
+               --max-time $(API_TIMEOUT)
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to fetch work item details"
+            exit 1
+          fi
+          
+          ITEM_COUNT=$(cat workitems_detailed.json | jq '.value | length')
+          echo "✅ Successfully retrieved $ITEM_COUNT work items"
+        fi
+        
+        # Store for next stage
+        cp workitems_detailed.json $(Agent.TempDirectory)/
+        
+      displayName: 'Execute Work Item Query'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Work Items Data'
+      inputs:
+        pathToPublish: '$(Agent.TempDirectory)/workitems_detailed.json'
+        artifactName: 'extracted-workitems'
+      condition: always()
+
+# ==========================================
+# Stage 3: AI Analysis
+# ==========================================
+- stage: AIAnalysis
+  displayName: 'AI-Powered Analysis'
+  dependsOn: 
+    - Setup
+    - ExtractData
+  condition: succeeded()
+  jobs:
+  - job: CopilotAnalysis
+    displayName: 'Analyze with GitHub Copilot'
+    steps:
+    
+    - script: |
+        # Re-setup Copilot CLI (agents don't persist between stages)
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+        sudo apt-get update && sudo apt-get install -y nodejs jq
+        sudo npm install -g @github/copilot
+        
+      displayName: 'Setup Copilot CLI'
+    
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Work Items'
+      inputs:
+        artifactName: 'extracted-workitems'
+        downloadPath: '$(Agent.TempDirectory)'
+    
+    - script: |
+        # Setup authentication
+        export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+        export GH_TOKEN="$(GITHUB_TOKEN)"
+        
+        echo "🤖 Starting AI Analysis..."
+        echo "Analysis Mode: ${{ parameters.analysisMode }}"
+        
+        # Check if we have work items
+        ITEM_COUNT=$(cat $(Agent.TempDirectory)/workitems_detailed.json | jq '.value | length')
+        
+        if [ "$ITEM_COUNT" -eq 0 ]; then
+          echo "⚠️ No work items to analyze"
+          
+          # Create empty report
+          cat > $(Agent.TempDirectory)/analysis-report.md << 'EOF'
+        # 📋 Backlog Analysis Report
+        
+        **Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')
+        **Project:** ${{ parameters.projectName }}
+        **Pipeline:** $(Build.BuildId)
+        
+        ## ⚠️ No Work Items Found
+        
+        No work items matched the analysis criteria:
+        - **Project:** ${{ parameters.projectName }}
+        - **Types:** ${{ parameters.workItemTypes }}
+        - **Status:** Active (not Closed/Done/Removed)
+        
+        ### 💡 Troubleshooting Tips
+        1. Verify project name is correct
+        2. Check work item types exist in your project
+        3. Ensure work items are not in closed states
+        4. Verify pipeline has access to the project
+        EOF
+        else
+          # Define analysis prompts based on mode
+          case "${{ parameters.analysisMode }}" in
+            "Technical")
+              ANALYSIS_FOCUS="Focus on technical feasibility, complexity, dependencies, and implementation risks. Rate technical quality 1-10."
+              ;;
+            "Business") 
+              ANALYSIS_FOCUS="Focus on business value, user impact, ROI, and strategic alignment. Rate business value 1-10."
+              ;;
+            "Comprehensive")
+              ANALYSIS_FOCUS="Provide comprehensive analysis including INVEST framework, technical feasibility, business value, and quality. Rate overall quality 1-10."
+              ;;
+            *)
+              ANALYSIS_FOCUS="Analyze this work item for quality using INVEST framework. Rate quality 1-10 and provide specific improvement recommendations."
+              ;;
+          esac
+          
+          # Initialize report
+          cat > $(Agent.TempDirectory)/analysis-report.md << HEADER
+        # 📋 Backlog Analysis Report
+        
+        **Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')
+        **Project:** ${{ parameters.projectName }}
+        **Pipeline:** $(Build.BuildId)
+        **Analysis Mode:** ${{ parameters.analysisMode }}
+        
+        ---
+        
+        ## 📊 Analysis Summary
+        
+        - **Work Items Analyzed:** $ITEM_COUNT
+        - **Types:** ${{ parameters.workItemTypes }}
+        - **Analysis Focus:** ${{ parameters.analysisMode }}
+        
+        ---
+        
+        ## 📝 Detailed Analysis
+        
+        HEADER
+          
+          # Process each work item
+          for i in $(seq 0 $((ITEM_COUNT - 1))); do
+            echo "🔄 Processing work item $((i + 1))/$ITEM_COUNT..."
+            
+            # Extract work item data
+            WI_DATA=$(cat $(Agent.TempDirectory)/workitems_detailed.json | jq ".value[$i]")
+            WI_ID=$(echo "$WI_DATA" | jq -r '.id')
+            WI_TITLE=$(echo "$WI_DATA" | jq -r '.fields["System.Title"] // "No Title"')
+            WI_TYPE=$(echo "$WI_DATA" | jq -r '.fields["System.WorkItemType"] // "Unknown"')
+            WI_STATE=$(echo "$WI_DATA" | jq -r '.fields["System.State"] // "Unknown"')
+            WI_DESCRIPTION=$(echo "$WI_DATA" | jq -r '.fields["System.Description"] // "No Description"' | sed 's/<[^>]*>//g')
+            WI_ACCEPTANCE=$(echo "$WI_DATA" | jq -r '.fields["Microsoft.VSTS.Common.AcceptanceCriteria"] // "No Acceptance Criteria"' | sed 's/<[^>]*>//g')
+            WI_PRIORITY=$(echo "$WI_DATA" | jq -r '.fields["Microsoft.VSTS.Common.Priority"] // "Not Set"')
+            WI_STORY_POINTS=$(echo "$WI_DATA" | jq -r '.fields["Microsoft.VSTS.Scheduling.StoryPoints"] // "Not Estimated"')
+            
+            # Create analysis prompt
+            echo "Creating analysis prompt for work item #$WI_ID..."
+            PROMPT="$ANALYSIS_FOCUS. Work Item - ID: $WI_ID, Title: $WI_TITLE, Type: $WI_TYPE, State: $WI_STATE, Priority: $WI_PRIORITY, Story Points: $WI_STORY_POINTS. Description: $WI_DESCRIPTION. Acceptance Criteria: $WI_ACCEPTANCE. Provide structured analysis with clear recommendations."
+            
+            # Get Copilot analysis
+            echo "🤖 Analyzing work item #$WI_ID..."
+            if ANALYSIS=$(echo "$PROMPT" | timeout $(COPILOT_TIMEOUT) copilot 2>&1) && [ -n "$ANALYSIS" ]; then
+              echo "✅ Analysis complete for #$WI_ID"
+            else
+              echo "⚠️ Analysis failed for #$WI_ID, using fallback"
+              ANALYSIS="Analysis timeout or error occurred. This work item requires manual review."
+            fi
+            
+            # Add to report
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "### 🎯 Work Item #${WI_ID}: ${WI_TITLE}" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "**Type:** ${WI_TYPE} | **State:** ${WI_STATE} | **Priority:** ${WI_PRIORITY} | **Story Points:** ${WI_STORY_POINTS}" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "#### 🤖 AI Analysis" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "${ANALYSIS}" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "#### 📋 Raw Data" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "- **Description:** ${WI_DESCRIPTION}" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "- **Acceptance Criteria:** ${WI_ACCEPTANCE}" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "---" >> $(Agent.TempDirectory)/analysis-report.md
+            echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          done
+          
+          # Add summary footer
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "## 📈 Next Steps" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "1. **Review Quality Scores** - Focus on items rated below 7/10" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "2. **Address Top Issues** - Implement the highest-impact recommendations" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "3. **Backlog Refinement** - Schedule sessions to improve low-scoring items" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "4. **Team Discussion** - Share insights with product owner and development team" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "**🔄 Run this analysis regularly to track improvement over time!**" >> $(Agent.TempDirectory)/analysis-report.md
+        fi
+        
+      displayName: 'Generate AI Analysis'
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+        GH_TOKEN: $(GITHUB_TOKEN)
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Analysis Report'
+      inputs:
+        pathToPublish: '$(Agent.TempDirectory)/analysis-report.md'
+        artifactName: 'backlog-analysis-report'
+      condition: always()
+
+# ==========================================
+# Stage 4: Results & Summary
+# ==========================================
+- stage: Results
+  displayName: 'Results & Next Steps'
+  dependsOn: AIAnalysis
+  condition: always()  # Run even if analysis partially failed
+  jobs:
+  - job: GenerateSummary
+    displayName: 'Provide Summary & Next Steps'
+    steps:
+    
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Analysis Report'
+      inputs:
+        artifactName: 'backlog-analysis-report'
+        downloadPath: '$(Agent.TempDirectory)'
+      continueOnError: true
+    
+    - script: |
+        echo "================================================"
+        echo "🎉 BACKLOG ANALYSIS COMPLETE"
+        echo "================================================"
+        echo ""
+        echo "📊 Analysis Summary:"
+        echo "  Project: ${{ parameters.projectName }}"
+        echo "  Items Requested: ${{ parameters.analyzeTop }}"
+        echo "  Types: ${{ parameters.workItemTypes }}" 
+        echo "  Analysis Mode: ${{ parameters.analysisMode }}"
+        echo "  Pipeline: $(Build.BuildId)"
+        echo ""
+        
+        # Check if report was generated
+        if [ -f "$(Agent.TempDirectory)/analysis-report.md" ]; then
+          REPORT_SIZE=$(wc -l < "$(Agent.TempDirectory)/analysis-report.md")
+          echo "✅ Analysis report generated ($REPORT_SIZE lines)"
+          echo ""
+          echo "📥 Download Your Report:"
+          echo "  1. Go to Pipeline → Run #$(Build.BuildId)"
+          echo "  2. Click 'Artifacts' tab"
+          echo "  3. Download 'backlog-analysis-report'"
+          echo ""
+          echo "🎯 Next Steps:"
+          echo "  1. Review quality scores and recommendations"
+          echo "  2. Schedule backlog refinement sessions"
+          echo "  3. Track improvements over time"
+          echo "  4. Share insights with your team"
+        else
+          echo "⚠️ Analysis report not found"
+          echo "Check previous stages for errors"
+        fi
+        
+        echo ""
+        echo "🔄 Run again anytime with different parameters!"
+        echo "💡 Tip: Start with analyzeTop=5 for faster testing"
+        echo "================================================"
+        
+      displayName: 'Display Results Summary'

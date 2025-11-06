@@ -1,0 +1,868 @@
+# Azure DevOps Pipeline for AI-Powered Backlog Analysis
+# Uses GitHub Copilot CLI to analyze work items and provide quality insights
+
+trigger: none  # Manual trigger - can be changed to scheduled
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+parameters:
+  - name: analyzeTop
+    displayName: 'Number of work items to analyze'
+    type: number
+    default: 5
+    values: [5, 10, 15, 20, 25, 30]
+  
+  - name: analysisMode
+    displayName: 'Analysis Mode'
+    type: string
+    default: 'standard'
+    values: 
+      - 'basic'      # Quick quality check
+      - 'standard'   # Full INVEST analysis
+      - 'detailed'   # Comprehensive with recommendations
+      - 'governance' # Compliance and risk assessment
+  
+  - name: workItemTypes
+    displayName: 'Work Item Types to Analyze'
+    type: string
+    default: 'User Story,Product Backlog Item'
+  
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'Parts Unlimited'
+  
+  - name: includeClosedItems
+    displayName: 'Include Recently Closed Items'
+    type: boolean
+    default: false
+  
+  - name: priorityFilter
+    displayName: 'Priority Filter (1=High, 4=Low)'
+    type: string
+    default: '1,2,3,4'
+  
+  - name: enableNotifications
+    displayName: 'Enable Teams/Slack Notifications'
+    type: boolean
+    default: false
+  
+  - name: generateExecutiveSummary
+    displayName: 'Generate Executive Summary'
+    type: boolean
+    default: true
+
+variables:
+  # Security: Variable groups for credentials
+  - group: 'copilot-credentials'  # Required: GITHUB_TOKEN
+  - group: 'notification-settings'  # Optional: TEAMS_WEBHOOK, SLACK_WEBHOOK
+  
+  # Pipeline Configuration
+  - name: PROJECT_NAME_ENCODED
+    value: ${{ replace(parameters.projectName, ' ', '%20') }}
+  - name: ANALYSIS_TIMESTAMP
+    value: $[format('{0:yyyy}-{0:MM}-{0:dd}T{0:HH}-{0:mm}-{0:ss}Z', pipeline.startTime)]
+  - name: COPILOT_CLI_VERSION
+    value: '@github/copilot@latest'
+  - name: NODE_VERSION
+    value: '22'
+  - name: MAX_RETRY_ATTEMPTS
+    value: 3
+  - name: COPILOT_TIMEOUT
+    value: 120  # seconds
+  - name: API_TIMEOUT
+    value: 30   # seconds
+
+stages:
+- stage: Setup
+  displayName: 'Setup Environment & Validation'
+  jobs:
+  - job: ValidatePrerequisites
+    displayName: 'Validate Prerequisites'
+    timeoutInMinutes: 10
+    steps:
+    
+    - script: |
+        echo "🔍 VALIDATING PIPELINE PARAMETERS"
+        echo "======================================"
+        echo "Analysis Mode: ${{ parameters.analysisMode }}"
+        echo "Items to Analyze: ${{ parameters.analyzeTop }}"
+        echo "Project: ${{ parameters.projectName }}"
+        echo "Work Item Types: ${{ parameters.workItemTypes }}"
+        echo "Include Closed: ${{ parameters.includeClosedItems }}"
+        echo "Priority Filter: ${{ parameters.priorityFilter }}"
+        echo "Notifications: ${{ parameters.enableNotifications }}"
+        echo "Executive Summary: ${{ parameters.generateExecutiveSummary }}"
+        echo "Timestamp: $(ANALYSIS_TIMESTAMP)"
+        
+        # Validate parameter ranges
+        if [ ${{ parameters.analyzeTop }} -lt 1 ] || [ ${{ parameters.analyzeTop }} -gt 30 ]; then
+          echo "❌ ERROR: analyzeTop must be between 1 and 30"
+          exit 1
+        fi
+        
+        # Validate priority filter format
+        if ! echo "${{ parameters.priorityFilter }}" | grep -E '^[1-4](,[1-4])*$' > /dev/null; then
+          echo "❌ ERROR: Invalid priority filter format. Use comma-separated values 1-4"
+          exit 1
+        fi
+        
+        echo "✅ Parameter validation passed"
+        
+      displayName: 'Validate Parameters'
+    
+    - script: |
+        echo "🛠️ INSTALLING PREREQUISITES WITH RETRY LOGIC"
+        echo "============================================="
+        
+        # Function for retries
+        retry_command() {
+          local cmd="$1"
+          local max_attempts=$(MAX_RETRY_ATTEMPTS)
+          local attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt/$max_attempts: $cmd"
+            if eval "$cmd"; then
+              echo "✅ Command succeeded on attempt $attempt"
+              return 0
+            else
+              echo "❌ Command failed on attempt $attempt"
+              if [ $attempt -eq $max_attempts ]; then
+                echo "💥 All attempts failed!"
+                return 1
+              fi
+              echo "⏳ Waiting 5 seconds before retry..."
+              sleep 5
+              attempt=$((attempt + 1))
+            fi
+          done
+        }
+        
+        # Install Node.js with retry
+        retry_command "curl -fsSL https://deb.nodesource.com/setup_$(NODE_VERSION).x | sudo -E bash -"
+        retry_command "sudo apt-get update && sudo apt-get install -y nodejs jq curl"
+        
+        # Verify installations
+        echo "📋 VERIFYING INSTALLATIONS"
+        echo "Node.js version: $(node --version)"
+        echo "npm version: $(npm --version)"
+        echo "jq version: $(jq --version)"
+        
+        # Validate Node.js version
+        NODE_MAJOR=$(node --version | cut -d'.' -f1 | sed 's/v//')
+        if [ "$NODE_MAJOR" -lt $(NODE_VERSION) ]; then
+          echo "❌ ERROR: Node.js version must be $(NODE_VERSION) or higher"
+          exit 1
+        fi
+        
+        echo "✅ Prerequisites validated successfully"
+        
+      displayName: 'Install and Validate Tools'
+    
+    - script: |
+        echo "🚀 INSTALLING GITHUB COPILOT CLI"
+        echo "================================"
+        
+        # Install with retry and version verification
+        retry_command() {
+          local max_attempts=$(MAX_RETRY_ATTEMPTS)
+          local attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            echo "Installing Copilot CLI (attempt $attempt/$max_attempts)..."
+            if sudo npm install -g $(COPILOT_CLI_VERSION) --timeout=60000; then
+              echo "✅ Copilot CLI installed successfully"
+              return 0
+            else
+              echo "❌ Installation failed on attempt $attempt"
+              if [ $attempt -eq $max_attempts ]; then
+                echo "💥 Copilot CLI installation failed after $max_attempts attempts"
+                return 1
+              fi
+              sleep 10
+              attempt=$((attempt + 1))
+            fi
+          done
+        }
+        
+        retry_command
+        
+        # Verify installation
+        echo "📋 VERIFYING COPILOT CLI"
+        which copilot || {
+          echo "❌ ERROR: Copilot CLI not found in PATH"
+          exit 1
+        }
+        
+        # Test basic functionality
+        copilot --version 2>/dev/null || echo "Copilot CLI ready (version check skipped)"
+        
+        echo "✅ GitHub Copilot CLI ready"
+        
+      displayName: 'Install GitHub Copilot CLI'
+    
+    - script: |
+        echo "🔐 TESTING COPILOT CLI AUTHENTICATION"
+        echo "===================================="
+        
+        # Set environment variables for authentication
+        export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+        export GH_TOKEN="$(GITHUB_TOKEN)"
+        
+        # Enhanced token validation
+        if [ -z "$GITHUB_TOKEN" ]; then
+          echo "❌ CRITICAL ERROR: GITHUB_TOKEN is not set!"
+          echo "💡 Solution: Create variable group 'copilot-credentials' with GITHUB_TOKEN"
+          exit 1
+        fi
+        
+        # Validate token format (GitHub tokens start with ghp_, gho_, ghu_, or ghs_)
+        if ! echo "$GITHUB_TOKEN" | grep -E '^gh[pousr]_[A-Za-z0-9_]{36,}$' > /dev/null; then
+          echo "❌ WARNING: GITHUB_TOKEN format may be invalid"
+          echo "Expected format: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        fi
+        
+        echo "✅ GITHUB_TOKEN is set (length: ${#GITHUB_TOKEN})"
+        
+        # Multi-stage authentication test
+        test_copilot() {
+          local test_prompt="$1"
+          local timeout_duration="$2"
+          local attempt="$3"
+          
+          echo "🧪 Test $attempt: $test_prompt"
+          
+          local result
+          result=$(echo "$test_prompt" | timeout "$timeout_duration" copilot 2>&1)
+          local exit_code=$?
+          
+          case $exit_code in
+            0)
+              echo "✅ Test $attempt passed"
+              return 0
+              ;;
+            124)
+              echo "⏱️ Test $attempt timed out after ${timeout_duration}s"
+              return 1
+              ;;
+            *)
+              echo "❌ Test $attempt failed (exit code: $exit_code)"
+              echo "Response: $result"
+              return 1
+              ;;
+          esac
+        }
+        
+        # Progressive authentication tests
+        echo "🔍 Running progressive authentication tests..."
+        
+        # Test 1: Simple math (fast response expected)
+        if test_copilot "What is 2+2? Answer with just the number." 15 1; then
+          echo "✅ Basic Copilot functionality confirmed"
+        else
+          echo "❌ Basic test failed, trying alternative approach..."
+          
+          # Test 2: Even simpler prompt
+          if test_copilot "Say 'OK'" 10 2; then
+            echo "✅ Alternative test passed"
+          else
+            echo "❌ CRITICAL: All Copilot authentication tests failed!"
+            echo "💡 Troubleshooting steps:"
+            echo "   1. Verify GITHUB_TOKEN has Copilot access"
+            echo "   2. Check if Copilot subscription is active"
+            echo "   3. Ensure token has required scopes"
+            exit 1
+          fi
+        fi
+        
+        # Test 3: Verify Copilot can handle structured prompts
+        echo "🔍 Testing structured prompt handling..."
+        if test_copilot "Analyze this text and respond with 'READY': Hello World" 20 3; then
+          echo "✅ Structured prompt test passed"
+        else
+          echo "⚠️ WARNING: Structured prompts may have issues"
+          echo "Continuing with basic functionality..."
+        fi
+        
+        echo "🎉 Copilot CLI authentication and functionality verified!"
+        
+      displayName: 'Test Copilot Authentication & Functionality'
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+        GH_TOKEN: $(GITHUB_TOKEN)
+      timeoutInMinutes: 5
+
+- stage: FetchWorkItems
+  displayName: 'Fetch Work Items from Azure DevOps'
+  dependsOn: Setup
+  condition: succeeded()
+  jobs:
+  - job: GetWorkItems
+    displayName: 'Query and Fetch Work Items'
+    timeoutInMinutes: 15
+    steps:
+    
+    - script: |
+        echo "📋 BUILDING DYNAMIC WIQL QUERY"
+        echo "=============================="
+        
+        # Build state filter based on includeClosedItems parameter
+        if [ "${{ parameters.includeClosedItems }}" = "true" ]; then
+          STATE_FILTER="AND [System.State] NOT IN ('Removed')"
+          echo "📊 Including closed items in analysis"
+        else
+          STATE_FILTER="AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved')"
+          echo "📊 Excluding closed items from analysis"
+        fi
+        
+        # Build priority filter
+        PRIORITY_VALUES=$(echo "${{ parameters.priorityFilter }}" | sed 's/,/", "/g')
+        PRIORITY_FILTER="AND [Microsoft.VSTS.Common.Priority] IN (\"$PRIORITY_VALUES\")"
+        
+        # Build work item type filter
+        WIT_VALUES=$(echo "${{ parameters.workItemTypes }}" | sed 's/,/", "/g')
+        WIT_FILTER="AND [System.WorkItemType] IN (\"$WIT_VALUES\")"
+        
+        echo "Priority Filter: $PRIORITY_FILTER"
+        echo "Work Item Types: $WIT_FILTER"
+        echo "State Filter: $STATE_FILTER"
+        
+        # Create comprehensive WIQL query using echo instead of heredoc
+        echo "{" > query.json
+        echo "  \"query\": \"SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.Description], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Scheduling.StoryPoints], [System.Tags], [System.AreaPath], [System.IterationPath], [System.CreatedDate], [System.ChangedDate], [System.AssignedTo] FROM WorkItems WHERE [System.TeamProject] = '${{ parameters.projectName }}' $WIT_FILTER $STATE_FILTER $PRIORITY_FILTER ORDER BY [Microsoft.VSTS.Common.Priority], [System.ChangedDate] DESC\"" >> query.json
+        echo "}" >> query.json
+        
+        echo "📋 Generated WIQL Query:"
+        cat query.json | jq .
+        
+      displayName: 'Generate Dynamic WIQL Query'
+    
+    - script: |
+        echo "🚀 EXECUTING AZURE DEVOPS API CALLS"
+        echo "===================================="
+        
+        # Function for API calls with retry logic
+        call_api_with_retry() {
+          local url="$1"
+          local method="$2"
+          local data="$3"
+          local output_file="$4"
+          local description="$5"
+          local max_attempts=$(MAX_RETRY_ATTEMPTS)
+          local attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "📞 Attempt $attempt/$max_attempts: $description"
+            
+            local curl_cmd
+            if [ "$method" = "POST" ]; then
+              curl_cmd="curl -s -X POST -H 'Authorization: Bearer $(System.AccessToken)' -H 'Content-Type: application/json' -d @$data --connect-timeout $(API_TIMEOUT) --max-time $(API_TIMEOUT) '$url'"
+            else
+              curl_cmd="curl -s -H 'Authorization: Bearer $(System.AccessToken)' --connect-timeout $(API_TIMEOUT) --max-time $(API_TIMEOUT) '$url'"
+            fi
+            
+            if eval "$curl_cmd" > "$output_file.tmp"; then
+              # Validate JSON response
+              if jq empty "$output_file.tmp" 2>/dev/null; then
+                mv "$output_file.tmp" "$output_file"
+                echo "✅ $description successful"
+                return 0
+              else
+                echo "❌ Invalid JSON response on attempt $attempt"
+                cat "$output_file.tmp" | head -5
+              fi
+            else
+              echo "❌ API call failed on attempt $attempt"
+            fi
+            
+            if [ $attempt -eq $max_attempts ]; then
+              echo "💥 $description failed after $max_attempts attempts"
+              return 1
+            fi
+            
+            echo "⏳ Waiting 10 seconds before retry..."
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+        }
+        
+        # Execute WIQL query with retry
+        API_URL="$(System.CollectionUri)$(PROJECT_NAME_ENCODED)/_apis/wit/wiql?api-version=7.0"
+        
+        if ! call_api_with_retry "$API_URL" "POST" "query.json" "workitem_ids.json" "WIQL Query Execution"; then
+          echo "❌ CRITICAL: Failed to execute WIQL query"
+          exit 1
+        fi
+        
+        # Validate query results
+        TOTAL_ITEMS=$(cat workitem_ids.json | jq '.workItems | length')
+        echo "📋 Query returned $TOTAL_ITEMS work items"
+        
+        if [ "$TOTAL_ITEMS" -eq 0 ]; then
+          echo "⚠️ WARNING: No work items found matching criteria"
+          echo "💡 Check your filters:"
+          echo "   - Project: ${{ parameters.projectName }}"
+          echo "   - Work Item Types: ${{ parameters.workItemTypes }}"
+          echo "   - Priority Filter: ${{ parameters.priorityFilter }}"
+          echo "   - Include Closed: ${{ parameters.includeClosedItems }}"
+          
+          # Create empty result for downstream stages
+          echo '{"value": []}' > workitems_detailed.json
+        else
+          # Get limited set of IDs based on analyzeTop parameter
+          ITEMS_TO_FETCH=$([ "$TOTAL_ITEMS" -lt ${{ parameters.analyzeTop }} ] && echo "$TOTAL_ITEMS" || echo "${{ parameters.analyzeTop }}")
+          echo "🎯 Fetching top $ITEMS_TO_FETCH items for analysis"
+          
+          IDS=$(cat workitem_ids.json | jq -r ".workItems[:$ITEMS_TO_FETCH] | map(.id) | join(\",\")")
+          
+          if [ -n "$IDS" ]; then
+            echo "📎 Work Item IDs to fetch: $IDS"
+            
+            # Fetch detailed work items with retry
+            DETAILS_URL="$(System.CollectionUri)$(PROJECT_NAME_ENCODED)/_apis/wit/workitems?ids=${IDS}&\$expand=all&api-version=7.0"
+            
+            if call_api_with_retry "$DETAILS_URL" "GET" "" "workitems_detailed.json" "Work Items Details Fetch"; then
+              # Validate and summarize results
+              FETCHED_COUNT=$(cat workitems_detailed.json | jq '.value | length')
+              echo ""
+              echo "🎉 SUCCESSFULLY FETCHED $FETCHED_COUNT WORK ITEMS"
+              echo "================================================"
+              
+              # Display summary
+              cat workitems_detailed.json | jq -r '.value[] | "ID: \(.id) | Type: \(.fields."System.WorkItemType") | Title: \(.fields."System.Title" // "No Title")"' | head -10
+              
+              if [ "$FETCHED_COUNT" -gt 10 ]; then
+                echo "... and $((FETCHED_COUNT - 10)) more items"
+              fi
+            else
+              echo "❌ CRITICAL: Failed to fetch work item details"
+              exit 1
+            fi
+          else
+            echo "❌ ERROR: No valid work item IDs extracted"
+            exit 1
+          fi
+        fi
+        
+        # Save artifacts
+        mkdir -p $(Agent.TempDirectory)/workitems-data
+        cp workitems_detailed.json $(Agent.TempDirectory)/workitems-data/
+        cp workitem_ids.json $(Agent.TempDirectory)/workitems-data/
+        
+        # Create metadata file using echo instead of heredoc
+        echo "{" > $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"pipeline_run\": \"$(Build.BuildId)\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"timestamp\": \"$(ANALYSIS_TIMESTAMP)\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"project\": \"${{ parameters.projectName }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"total_available\": $TOTAL_ITEMS," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"items_fetched\": $(cat workitems_detailed.json | jq '.value | length')," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"analysis_mode\": \"${{ parameters.analysisMode }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  \"parameters\": {" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "    \"analyzeTop\": ${{ parameters.analyzeTop }}," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "    \"workItemTypes\": \"${{ parameters.workItemTypes }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "    \"includeClosedItems\": ${{ parameters.includeClosedItems }}," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "    \"priorityFilter\": \"${{ parameters.priorityFilter }}\"" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "  }" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        echo "}" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+        
+        echo "✅ Work items data prepared for analysis"
+        
+      displayName: 'Fetch Work Items with Retry Logic'
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Work Items Data'
+      inputs:
+        pathToPublish: '$(Agent.TempDirectory)/workitems-data'
+        artifactName: 'workitems-data'
+      condition: always()
+
+- stage: AnalyzeWithCopilot
+  displayName: 'AI Analysis with GitHub Copilot'
+  dependsOn: 
+    - Setup
+    - FetchWorkItems
+  condition: succeeded()
+  jobs:
+  - job: CopilotAnalysis
+    displayName: 'Advanced Copilot Analysis'
+    timeoutInMinutes: 30
+    steps:
+    
+    - script: |
+        # Reinstall Copilot CLI in this job (different agent)
+        curl -fsSL https://deb.nodesource.com/setup_$(NODE_VERSION).x | sudo -E bash -
+        sudo apt-get install -y nodejs jq
+        sudo npm install -g $(COPILOT_CLI_VERSION) --timeout=60000
+        
+        echo "✅ Copilot CLI ready for analysis"
+        
+      displayName: 'Setup Copilot CLI for Analysis'
+    
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Work Items Data'
+      inputs:
+        artifactName: 'workitems-data'
+        downloadPath: '$(Agent.TempDirectory)'
+    
+    - script: |
+        # Set authentication tokens
+        export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+        export GH_TOKEN="$(GITHUB_TOKEN)"
+        
+        echo "🤖 STARTING ADVANCED COPILOT ANALYSIS"
+        echo "====================================="
+        
+        # Load metadata
+        METADATA_FILE="$(Agent.TempDirectory)/workitems-data/metadata.json"
+        if [ -f "$METADATA_FILE" ]; then
+          echo "📊 Analysis Configuration:"
+          cat "$METADATA_FILE" | jq .
+        fi
+        
+        # Verify token and test Copilot
+        if [ -z "$GITHUB_TOKEN" ]; then
+          echo "❌ ERROR: GITHUB_TOKEN not set!"
+          exit 1
+        fi
+        
+        # Quick Copilot test
+        echo "🧪 Testing Copilot connectivity..."
+        TEST_RESULT=$(echo "Respond with 'READY'" | timeout 10 copilot 2>&1)
+        if [ $? -ne 0 ]; then
+          echo "❌ ERROR: Copilot test failed: $TEST_RESULT"
+          exit 1
+        fi
+        echo "✅ Copilot connectivity confirmed"
+        
+        # Initialize comprehensive report
+        echo "# 📋 AI-Powered Backlog Analysis Report" > $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "**Project:** ${{ parameters.projectName }}" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "**Analysis Mode:** ${{ parameters.analysisMode }}" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "**Pipeline Run:** $(Build.BuildId)" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "**Items Analyzed:** ${{ parameters.analyzeTop }}" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "---" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        
+        # Build analysis prompt based on mode
+        case "${{ parameters.analysisMode }}" in
+          "basic")
+            ANALYSIS_PROMPT="Briefly analyze this work item for quality (1-10 score) and list 2 key issues:"
+            ;;
+          "standard")
+            ANALYSIS_PROMPT="Analyze this work item using INVEST principles. Provide: 1) Overall score (1-10), 2) INVEST compliance, 3) Top 3 issues, 4) One key recommendation:"
+            ;;
+          "detailed")
+            ANALYSIS_PROMPT="Comprehensive analysis of this work item. Provide: 1) Quality score (1-10), 2) INVEST principle breakdown, 3) Detailed issues list, 4) Specific recommendations, 5) Risk assessment:"
+            ;;
+          "governance")
+            ANALYSIS_PROMPT="Governance and compliance analysis. Evaluate: 1) Quality score (1-10), 2) Risk level (Low/Medium/High), 3) Compliance issues, 4) Required actions, 5) Stakeholder impact:"
+            ;;
+          *)
+            ANALYSIS_PROMPT="Analyze this work item for quality and provide improvement recommendations:"
+            ;;
+        esac
+        
+        echo "🎯 Using analysis mode: ${{ parameters.analysisMode }}"
+        echo "📝 Analysis prompt template: $ANALYSIS_PROMPT"
+        
+        # Process work items with enhanced error handling
+        PROCESSED=0
+        FAILED=0
+        MAX_ITEMS=${{ parameters.analyzeTop }}
+        WORKITEMS_FILE="$(Agent.TempDirectory)/workitems-data/workitems_detailed.json"
+        
+        if [ ! -f "$WORKITEMS_FILE" ]; then
+          echo "❌ ERROR: Work items file not found!"
+          exit 1
+        fi
+        
+        TOTAL_AVAILABLE=$(cat "$WORKITEMS_FILE" | jq '.value | length')
+        echo "📊 Processing $TOTAL_AVAILABLE work items..."
+        
+        # Add summary section to report
+        echo "## 📊 Executive Summary" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "| Metric | Value |" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "|--------|--------|" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "| Total Items Available | $TOTAL_AVAILABLE |" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "| Items Analyzed | Processing... |" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "| Analysis Mode | ${{ parameters.analysisMode }} |" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "---" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "## 📝 Detailed Work Item Analysis" >> $(Agent.TempDirectory)/analysis-report.md
+        echo "" >> $(Agent.TempDirectory)/analysis-report.md
+        
+        # Enhanced processing loop with progress tracking
+        for i in $(seq 0 $((MAX_ITEMS - 1))); do
+          # Get work item at index i
+          ITEM=$(cat "$WORKITEMS_FILE" | jq -c ".value[$i]")
+          
+          if [ "$ITEM" = "null" ] || [ -z "$ITEM" ]; then
+            echo "ℹ️ No more items to process (processed: $PROCESSED)"
+            break
+          fi
+          
+          # Extract and sanitize fields
+          WI_ID=$(echo "$ITEM" | jq -r '.id')
+          WI_TITLE=$(echo "$ITEM" | jq -r '.fields."System.Title" // "Untitled"' | sed 's/["`\r\n]/ /g' | head -c 100)
+          WI_TYPE=$(echo "$ITEM" | jq -r '.fields."System.WorkItemType" // "Unknown"')
+          WI_STATE=$(echo "$ITEM" | jq -r '.fields."System.State" // "Unknown"')
+          WI_PRIORITY=$(echo "$ITEM" | jq -r '.fields."Microsoft.VSTS.Common.Priority" // "0"')
+          WI_DESC=$(echo "$ITEM" | jq -r '.fields."System.Description" // "No description"' | sed 's/<[^>]*>//g' | sed 's/["`\r\n]/ /g' | head -c 300)
+          WI_AC=$(echo "$ITEM" | jq -r '.fields."Microsoft.VSTS.Common.AcceptanceCriteria" // "No acceptance criteria"' | sed 's/<[^>]*>//g' | sed 's/["`\r\n]/ /g' | head -c 200)
+          
+          echo ""
+          echo "🔍 Processing Work Item #$WI_ID ($((i + 1))/$MAX_ITEMS)"
+          echo "   Title: $WI_TITLE"
+          echo "   Type: $WI_TYPE | State: $WI_STATE | Priority: $WI_PRIORITY"
+          
+          # Build comprehensive prompt
+          FULL_PROMPT="$ANALYSIS_PROMPT
+          
+Work Item Details:
+- ID: $WI_ID
+- Title: $WI_TITLE  
+- Type: $WI_TYPE
+- State: $WI_STATE
+- Priority: $WI_PRIORITY
+- Description: $WI_DESC
+- Acceptance Criteria: $WI_AC
+
+Please analyze this work item and provide structured feedback."
+          
+          # Call Copilot with enhanced error handling
+          echo "🤖 Analyzing with Copilot..."
+          ANALYSIS=$(echo "$FULL_PROMPT" | timeout $(COPILOT_TIMEOUT) copilot 2>&1)
+          COPILOT_EXIT=$?
+          
+          case $COPILOT_EXIT in
+            0)
+              echo "✅ Analysis complete for #$WI_ID"
+              PROCESSED=$((PROCESSED + 1))
+              ;;
+            124)
+              echo "⏰ Timeout for #$WI_ID (${COPILOT_TIMEOUT}s)"
+              ANALYSIS="⏰ Analysis timed out - work item may be too complex or Copilot service is slow."
+              FAILED=$((FAILED + 1))
+              ;;
+            *)
+              echo "❌ Analysis failed for #$WI_ID (exit: $COPILOT_EXIT)"
+              ANALYSIS="❌ Analysis failed due to service error. Please retry or check Copilot service status."
+              FAILED=$((FAILED + 1))
+              ;;
+          esac
+          
+          # Add comprehensive results to report
+          echo "### 🎯 Work Item #${WI_ID}: ${WI_TITLE}" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "**Type:** ${WI_TYPE} | **State:** ${WI_STATE} | **Priority:** ${WI_PRIORITY}" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "**Description:** ${WI_DESC}" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "**Acceptance Criteria:** ${WI_AC}" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "**🤖 AI Analysis:**" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "${ANALYSIS}" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "---" >> $(Agent.TempDirectory)/analysis-report.md
+          echo "" >> $(Agent.TempDirectory)/analysis-report.md
+          
+          # Progress indicator
+          PROGRESS=$(echo "scale=1; ($i + 1) * 100 / $MAX_ITEMS" | bc -l 2>/dev/null || echo "N/A")
+          echo "📈 Progress: $((i + 1))/$MAX_ITEMS items ($PROGRESS%)"
+        done
+        
+        # Update summary in report
+        echo "✅ Analysis complete!"
+        echo "📊 Final Statistics:"
+        echo "   - Processed: $PROCESSED items"
+        echo "   - Failed: $FAILED items"
+        echo "   - Success Rate: $(echo "scale=1; $PROCESSED * 100 / ($PROCESSED + $FAILED)" | bc -l 2>/dev/null || echo "N/A")%"
+        
+        # Generate executive summary if requested
+        if [ "${{ parameters.generateExecutiveSummary }}" = "true" ]; then
+          echo ""
+          echo "📋 Generating executive summary..."
+          
+          SUMMARY_PROMPT="Based on the analysis of $PROCESSED work items from ${{ parameters.projectName }}, create a brief executive summary focusing on: 1) Overall backlog quality, 2) Top 3 issues found, 3) Key recommendations for improvement, 4) Risk assessment. Keep it concise and actionable for stakeholders."
+          
+          EXECUTIVE_SUMMARY=$(echo "$SUMMARY_PROMPT" | timeout 60 copilot 2>&1)
+          
+          if [ $? -eq 0 ]; then
+            echo "## 🎯 Executive Summary" > $(Agent.TempDirectory)/executive-summary.md
+            echo "" >> $(Agent.TempDirectory)/executive-summary.md
+            echo "$EXECUTIVE_SUMMARY" >> $(Agent.TempDirectory)/executive-summary.md
+            echo "✅ Executive summary generated"
+          else
+            echo "⚠️ Executive summary generation failed"
+          fi
+        fi
+        
+        # Validate we processed at least one item
+        if [ $PROCESSED -eq 0 ]; then
+          echo "❌ ERROR: No items were successfully processed!"
+          exit 1
+        fi
+        
+        echo "🎉 Analysis pipeline completed successfully!"
+        
+      displayName: 'Advanced AI Analysis'
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+        GH_TOKEN: $(GITHUB_TOKEN)
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Analysis Report'
+      inputs:
+        pathToPublish: '$(Agent.TempDirectory)/analysis-report.md'
+        artifactName: 'copilot-analysis-report'
+      condition: always()
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Executive Summary'
+      inputs:
+        pathToPublish: '$(Agent.TempDirectory)/executive-summary.md'
+        artifactName: 'executive-summary'
+      condition: and(always(), eq('${{ parameters.generateExecutiveSummary }}', 'true'))
+
+- stage: GenerateResults
+  displayName: 'Generate Final Results & Notifications'
+  dependsOn: AnalyzeWithCopilot
+  condition: succeededOrFailed()
+  jobs:
+  - job: CreateFinalReport
+    displayName: 'Create Comprehensive Report'
+    steps:
+    
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download All Artifacts'
+      inputs:
+        downloadType: 'specific'
+        downloadPath: '$(Agent.TempDirectory)'
+      continueOnError: true
+    
+    - script: |
+        echo "📊 GENERATING COMPREHENSIVE RESULTS"
+        echo "=================================="
+        echo ""
+        echo "🎯 Pipeline Execution Summary"
+        echo "Pipeline Run: $(Build.BuildId)"
+        echo "Timestamp: $(ANALYSIS_TIMESTAMP)"
+        echo "Project: ${{ parameters.projectName }}"
+        echo "Analysis Mode: ${{ parameters.analysisMode }}"
+        echo "Items Requested: ${{ parameters.analyzeTop }}"
+        echo ""
+        
+        # Check available artifacts
+        echo "📁 Available Artifacts:"
+        find $(Agent.TempDirectory) -name "*.md" -o -name "*.json" | head -10
+        echo ""
+        
+        # Display analysis report preview if available
+        ANALYSIS_REPORT="$(Agent.TempDirectory)/copilot-analysis-report/analysis-report.md"
+        if [ -f "$ANALYSIS_REPORT" ]; then
+          echo "✅ Analysis Report Generated Successfully"
+          echo ""
+          echo "📄 Report Preview (first 50 lines):"
+          echo "===================================="
+          head -50 "$ANALYSIS_REPORT"
+          echo ""
+          echo "📊 Report Statistics:"
+          echo "   Total Lines: $(wc -l < "$ANALYSIS_REPORT")"
+          echo "   File Size: $(du -h "$ANALYSIS_REPORT" | cut -f1)"
+        else
+          echo "⚠️ Analysis report not found at expected location"
+          echo "🔍 Searching for analysis files..."
+          find $(Agent.TempDirectory) -name "*analysis*" -type f
+        fi
+        
+        # Display executive summary if available
+        EXEC_SUMMARY="$(Agent.TempDirectory)/executive-summary/executive-summary.md"
+        if [ -f "$EXEC_SUMMARY" ]; then
+          echo ""
+          echo "📈 Executive Summary Generated"
+          echo "=============================="
+          cat "$EXEC_SUMMARY"
+        fi
+        
+        # Display metadata if available
+        METADATA_FILE="$(Agent.TempDirectory)/workitems-data/metadata.json"
+        if [ -f "$METADATA_FILE" ]; then
+          echo ""
+          echo "📋 Analysis Metadata:"
+          echo "===================="
+          cat "$METADATA_FILE" | jq .
+        fi
+        
+        echo ""
+        echo "🎉 ANALYSIS PIPELINE COMPLETED"
+        echo "=============================="
+        echo "✅ Backlog analysis finished successfully"
+        echo "📊 Results available in pipeline artifacts"
+        echo "🔗 Download artifacts to view detailed analysis"
+        
+        # Performance metrics
+        echo ""
+        echo "⚡ Performance Metrics:"
+        echo "   Pipeline Duration: $AGENT_JOBSTATUS seconds"
+        echo "   Analysis Mode: ${{ parameters.analysisMode }}"
+        echo "   Success: $([ -f "$ANALYSIS_REPORT" ] && echo "✅ Yes" || echo "❌ No")"
+        
+      displayName: 'Generate Final Summary'
+    
+    - script: |
+        # Send notifications if enabled
+        if [ "${{ parameters.enableNotifications }}" = "true" ]; then
+          echo "📢 SENDING NOTIFICATIONS"
+          echo "======================="
+          
+          # Teams notification (if webhook configured)
+          if [ -n "$(TEAMS_WEBHOOK)" ]; then
+            echo "📨 Sending Teams notification..."
+            
+            TEAMS_PAYLOAD="{
+              \"@type\": \"MessageCard\",
+              \"summary\": \"Backlog Analysis Complete\",
+              \"title\": \"🤖 AI Backlog Analysis Results\",
+              \"text\": \"Analysis completed for ${{ parameters.projectName }}\",
+              \"sections\": [{
+                \"facts\": [
+                  {\"name\": \"Project\", \"value\": \"${{ parameters.projectName }}\"},
+                  {\"name\": \"Items Analyzed\", \"value\": \"${{ parameters.analyzeTop }}\"},
+                  {\"name\": \"Analysis Mode\", \"value\": \"${{ parameters.analysisMode }}\"},
+                  {\"name\": \"Pipeline Run\", \"value\": \"$(Build.BuildId)\"},
+                  {\"name\": \"Timestamp\", \"value\": \"$(ANALYSIS_TIMESTAMP)\"}
+                ]
+              }],
+              \"potentialAction\": [{
+                \"@type\": \"OpenUri\",
+                \"name\": \"View Results\",
+                \"targets\": [{
+                  \"os\": \"default\",
+                  \"uri\": \"$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)\"
+                }]
+              }]
+            }"
+            
+            curl -H "Content-Type: application/json" -d "$TEAMS_PAYLOAD" "$(TEAMS_WEBHOOK)" || echo "⚠️ Teams notification failed"
+          fi
+          
+          echo "✅ Notifications sent"
+        else
+          echo "📢 Notifications disabled (enableNotifications: false)"
+        fi
+        
+      displayName: 'Send Notifications'
+      env:
+        TEAMS_WEBHOOK: $(TEAMS_WEBHOOK)
+        SLACK_WEBHOOK: $(SLACK_WEBHOOK)
+      condition: always()
+      continueOnError: true

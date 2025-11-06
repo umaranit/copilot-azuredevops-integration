@@ -1,0 +1,649 @@
+# Azure Pipeline Template: AI Analysis with GitHub Copilot
+# Reusable component for analyzing work items using GitHub Copilot CLI
+
+parameters:
+  - name: analysisMode
+    displayName: 'Analysis Mode'
+    type: string
+    default: 'standard'
+    values:
+      - 'basic'      # Quick overview and summary
+      - 'standard'   # Comprehensive analysis
+      - 'detailed'   # Deep dive with recommendations
+      - 'governance' # Focus on compliance and risk
+  
+  - name: customPrompt
+    displayName: 'Custom Analysis Prompt'
+    type: string
+    default: ''
+  
+  - name: timeoutMinutes
+    displayName: 'Analysis Timeout (minutes)'
+    type: number
+    default: 15
+  
+  - name: retryAttempts
+    displayName: 'Retry Attempts'
+    type: number
+    default: 2
+  
+  - name: includeMetrics
+    displayName: 'Include Quantitative Metrics'
+    type: boolean
+    default: true
+  
+  - name: generateSummary
+    displayName: 'Generate Executive Summary'
+    type: boolean
+    default: true
+  
+  - name: outputFormat
+    displayName: 'Output Format'
+    type: string
+    default: 'markdown'
+    values:
+      - 'markdown'
+      - 'json'
+      - 'both'
+
+stages:
+- stage: AIAnalysis
+  displayName: 'AI Analysis with GitHub Copilot'
+  jobs:
+  - job: AnalyzeWorkItems
+    displayName: 'Analyze Work Items with AI'
+    timeoutInMinutes: ${{ parameters.timeoutMinutes }}
+    variables:
+      ANALYSIS_MODE: ${{ parameters.analysisMode }}
+      CUSTOM_PROMPT: ${{ parameters.customPrompt }}
+      TIMEOUT_MINUTES: ${{ parameters.timeoutMinutes }}
+      RETRY_ATTEMPTS: ${{ parameters.retryAttempts }}
+      INCLUDE_METRICS: ${{ parameters.includeMetrics }}
+      GENERATE_SUMMARY: ${{ parameters.generateSummary }}
+      OUTPUT_FORMAT: ${{ parameters.outputFormat }}
+    
+    steps:
+    - script: |
+        echo "🤖 AI ANALYSIS TEMPLATE v1.0"
+        echo "============================"
+        echo "Analysis Mode: $(ANALYSIS_MODE)"
+        echo "Timeout: $(TIMEOUT_MINUTES) minutes"
+        echo "Retry Attempts: $(RETRY_ATTEMPTS)"
+        echo "Include Metrics: $(INCLUDE_METRICS)"
+        echo "Generate Summary: $(GENERATE_SUMMARY)"
+        echo "Output Format: $(OUTPUT_FORMAT)"
+        echo "Custom Prompt: $(CUSTOM_PROMPT)"
+        echo ""
+        
+        # Validate timeout
+        if [ $(TIMEOUT_MINUTES) -lt 5 ] || [ $(TIMEOUT_MINUTES) -gt 60 ]; then
+          echo "❌ ERROR: Timeout must be between 5 and 60 minutes"
+          exit 1
+        fi
+        
+        # Validate retry attempts
+        if [ $(RETRY_ATTEMPTS) -lt 1 ] || [ $(RETRY_ATTEMPTS) -gt 5 ]; then
+          echo "❌ ERROR: Retry attempts must be between 1 and 5"
+          exit 1
+        fi
+        
+        echo "✅ Parameter validation passed"
+        
+      displayName: 'Validate Template Parameters'
+    
+    - task: DownloadBuildArtifacts@1
+      displayName: 'Download Work Items Data'
+      inputs:
+        buildType: 'current'
+        artifactName: 'WorkItemsData'
+        downloadPath: '$(System.ArtifactsDirectory)'
+    
+    - script: |
+        echo "📊 PREPARING WORK ITEMS DATA FOR ANALYSIS"
+        echo "========================================="
+        
+        # Locate work items file
+        WORK_ITEMS_FILE="$(System.ArtifactsDirectory)/WorkItemsData/work_items_final.json"
+        
+        if [ ! -f "$WORK_ITEMS_FILE" ]; then
+          echo "❌ ERROR: Work items data file not found"
+          echo "Expected: $WORK_ITEMS_FILE"
+          echo "Available files:"
+          find "$(System.ArtifactsDirectory)" -type f 2>/dev/null || echo "No files found"
+          exit 1
+        fi
+        
+        # Validate JSON structure
+        if ! jq empty "$WORK_ITEMS_FILE" 2>/dev/null; then
+          echo "❌ ERROR: Invalid JSON in work items file"
+          exit 1
+        fi
+        
+        # Extract metadata and work items
+        WORK_ITEM_COUNT=$(jq '.metadata.count' "$WORK_ITEMS_FILE")
+        ORGANIZATION=$(jq -r '.metadata.organization' "$WORK_ITEMS_FILE")
+        PROJECT=$(jq -r '.metadata.project' "$WORK_ITEMS_FILE")
+        FETCH_TIMESTAMP=$(jq -r '.metadata.timestamp' "$WORK_ITEMS_FILE")
+        
+        echo "📋 Work Items Data Summary:"
+        echo "   - Count: $WORK_ITEM_COUNT"
+        echo "   - Organization: $ORGANIZATION"
+        echo "   - Project: $PROJECT"
+        echo "   - Fetched: $FETCH_TIMESTAMP"
+        
+        if [ "$WORK_ITEM_COUNT" -eq 0 ]; then
+          echo "⚠️ WARNING: No work items to analyze"
+          echo "Creating empty analysis results..."
+          
+          cat > analysis_results.json << EOF
+{
+  "metadata": {
+    "analysisMode": "$(ANALYSIS_MODE)",
+    "workItemCount": 0,
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "status": "completed",
+    "message": "No work items available for analysis"
+  },
+  "analysis": {
+    "summary": "No work items were found matching the specified criteria.",
+    "recommendations": [],
+    "metrics": {}
+  }
+}
+EOF
+          
+          echo "✅ Empty analysis results created"
+          exit 0
+        fi
+        
+        # Copy work items file for processing
+        cp "$WORK_ITEMS_FILE" work_items.json
+        
+        # Generate analysis preparation summary
+        echo ""
+        echo "🎯 ANALYSIS PREPARATION COMPLETE"
+        echo "==============================="
+        echo "✅ Work items data validated"
+        echo "✅ Ready for AI analysis with $(ANALYSIS_MODE) mode"
+        echo "✅ $WORK_ITEM_COUNT work items to analyze"
+        
+      displayName: 'Prepare Work Items Data'
+    
+    - script: |
+        echo "🧠 BUILDING ANALYSIS PROMPTS"
+        echo "============================"
+        
+        # Define analysis prompts based on mode
+        case "$(ANALYSIS_MODE)" in
+          "basic")
+            ANALYSIS_PROMPT="Analyze the following Azure DevOps work items and provide:
+1. A brief summary of the overall backlog health
+2. Top 3 priority areas that need attention
+3. Basic metrics (total items, state distribution)
+4. One key recommendation for improvement
+
+Keep the analysis concise and focused on immediate actionable insights."
+            ;;
+          
+          "standard")
+            ANALYSIS_PROMPT="Perform a comprehensive analysis of the following Azure DevOps work items:
+
+**Analysis Areas:**
+1. **Backlog Health Assessment**: Overall status, completion rates, bottlenecks
+2. **Work Distribution**: Balance across teams, types, and priorities
+3. **Quality Indicators**: Description quality, acceptance criteria, sizing
+4. **Process Efficiency**: Cycle times, state transitions, aging items
+5. **Risk Assessment**: Blocked items, dependencies, resource constraints
+
+**Deliverables:**
+- Executive summary with key findings
+- Detailed metrics and trends
+- Prioritized recommendations with rationale
+- Action items for process improvement
+
+Provide specific, data-driven insights with clear next steps."
+            ;;
+          
+          "detailed")
+            ANALYSIS_PROMPT="Conduct a deep-dive analysis of the Azure DevOps work items with the following comprehensive framework:
+
+**Strategic Analysis:**
+1. **Portfolio Health**: Alignment with business objectives, value delivery patterns
+2. **Capacity Planning**: Workload distribution, team utilization, sprint planning effectiveness
+3. **Quality Engineering**: Definition of done adherence, technical debt indicators
+4. **Delivery Predictability**: Velocity trends, commitment reliability, scope changes
+
+**Operational Excellence:**
+1. **Process Maturity**: Workflow optimization opportunities, automation potential
+2. **Collaboration Patterns**: Cross-team dependencies, communication effectiveness
+3. **Continuous Improvement**: Retrospective actions, process evolution
+4. **Risk Management**: Technical risks, business risks, mitigation strategies
+
+**Detailed Recommendations:**
+- Short-term tactical improvements (0-3 months)
+- Medium-term strategic initiatives (3-6 months)
+- Long-term transformation opportunities (6+ months)
+- Success metrics and KPIs for tracking progress
+
+Include specific examples from the data to support all findings and recommendations."
+            ;;
+          
+          "governance")
+            ANALYSIS_PROMPT="Analyze the Azure DevOps work items from a governance and compliance perspective:
+
+**Compliance Assessment:**
+1. **Process Adherence**: Template usage, required fields completion, approval workflows
+2. **Documentation Standards**: Acceptance criteria quality, description completeness
+3. **Traceability**: Requirements linkage, change tracking, audit trails
+4. **Risk Management**: Security considerations, compliance requirements, regulatory alignment
+
+**Governance Metrics:**
+1. **Policy Compliance**: Work item standards, naming conventions, categorization
+2. **Quality Gates**: Review processes, approval chains, escalation procedures
+3. **Reporting Standards**: Dashboard readiness, stakeholder communication
+4. **Change Management**: Impact assessment, change approval, rollback procedures
+
+**Risk Analysis:**
+- High-risk items requiring immediate attention
+- Compliance gaps and remediation plans
+- Process improvement recommendations
+- Governance framework enhancements
+
+Focus on regulatory compliance, risk mitigation, and process standardization."
+            ;;
+        esac
+        
+        # Add custom prompt if provided
+        if [ -n "$(CUSTOM_PROMPT)" ]; then
+          echo "🎨 Custom prompt detected, enhancing analysis..."
+          ANALYSIS_PROMPT="$ANALYSIS_PROMPT
+
+**Additional Custom Analysis:**
+$(CUSTOM_PROMPT)"
+        fi
+        
+        # Add metrics instruction if enabled
+        if [ "$(INCLUDE_METRICS)" = "True" ]; then
+          ANALYSIS_PROMPT="$ANALYSIS_PROMPT
+
+**Quantitative Metrics Required:**
+Please include specific numbers, percentages, and statistical analysis where applicable. 
+Calculate and present metrics such as:
+- Work item distribution by state, type, and priority
+- Average age of items in each state
+- Completion rates and velocity trends
+- Quality indicators (items with/without descriptions, acceptance criteria, etc.)
+- Risk indicators (blocked items, overdue items, etc.)"
+        fi
+        
+        # Save prompt for analysis
+        echo "$ANALYSIS_PROMPT" > analysis_prompt.txt
+        
+        echo "📝 Analysis Prompt Summary:"
+        echo "   - Mode: $(ANALYSIS_MODE)"
+        echo "   - Custom prompt: $(if [ -n \"$(CUSTOM_PROMPT)\" ]; then echo \"Yes\"; else echo \"No\"; fi)"
+        echo "   - Include metrics: $(INCLUDE_METRICS)"
+        echo "   - Prompt length: $(wc -w < analysis_prompt.txt) words"
+        
+        echo "✅ Analysis prompt prepared"
+        
+      displayName: 'Build Analysis Prompts'
+    
+    - script: |
+        echo "🤖 EXECUTING AI ANALYSIS"
+        echo "========================"
+        
+        # Set environment variables for Copilot
+        export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+        export GH_TOKEN="$(GITHUB_TOKEN)"
+        
+        # Validate Copilot availability
+        if ! which copilot > /dev/null; then
+          echo "❌ ERROR: GitHub Copilot CLI not found"
+          echo "💡 Ensure setup-copilot-template was executed in previous stage"
+          exit 1
+        fi
+        
+        # Function for AI analysis with retry
+        run_ai_analysis() {
+          local max_attempts=$(RETRY_ATTEMPTS)
+          local attempt=1
+          local timeout_seconds=$(($(TIMEOUT_MINUTES) * 60))
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "🧠 AI Analysis attempt $attempt/$max_attempts (timeout: ${timeout_seconds}s)"
+            
+            # Prepare input data
+            echo "📊 Preparing analysis input..."
+            
+            # Create combined input with prompt and data
+            cat > ai_input.txt << EOF
+$(cat analysis_prompt.txt)
+
+**WORK ITEMS DATA:**
+$(jq -c '.workItems' work_items.json)
+
+**METADATA:**
+$(jq -c '.metadata' work_items.json)
+EOF
+            
+            echo "📝 Input prepared ($(wc -c < ai_input.txt) characters)"
+            
+            # Execute analysis with timeout
+            local start_time=$(date +%s)
+            local result
+            
+            if result=$(timeout "$timeout_seconds" bash -c 'cat ai_input.txt | copilot' 2>&1); then
+              local end_time=$(date +%s)
+              local duration=$((end_time - start_time))
+              
+              echo "✅ AI analysis completed successfully on attempt $attempt"
+              echo "⏱️ Analysis duration: ${duration} seconds"
+              
+              # Validate result is not empty
+              if [ -z "$result" ]; then
+                echo "⚠️ Empty response from Copilot on attempt $attempt"
+                if [ $attempt -eq $max_attempts ]; then
+                  echo "💥 All attempts resulted in empty responses"
+                  return 1
+                fi
+              else
+                # Save raw result
+                echo "$result" > ai_analysis_raw.txt
+                echo "📝 Raw analysis saved ($(wc -c < ai_analysis_raw.txt) characters)"
+                return 0
+              fi
+            else
+              local exit_code=$?
+              echo "❌ AI analysis failed on attempt $attempt (exit code: $exit_code)"
+              
+              if [ $exit_code -eq 124 ]; then
+                echo "⏰ Analysis timed out after $timeout_seconds seconds"
+              else
+                echo "📤 Error output: $result"
+              fi
+              
+              if [ $attempt -eq $max_attempts ]; then
+                echo "💥 AI analysis failed after $max_attempts attempts"
+                return 1
+              fi
+            fi
+            
+            echo "⏳ Waiting 30 seconds before retry..."
+            sleep 30
+            attempt=$((attempt + 1))
+          done
+        }
+        
+        # Execute analysis
+        if run_ai_analysis; then
+          echo "🎉 AI analysis execution completed successfully"
+        else
+          echo "💥 AI analysis execution failed"
+          
+          # Create fallback analysis
+          echo "🔄 Creating fallback analysis..."
+          
+          WORK_ITEM_COUNT=$(jq '.metadata.count' work_items.json)
+          STATE_SUMMARY=$(jq -r '.workItems[] | .fields["System.State"]' work_items.json 2>/dev/null | sort | uniq -c | sort -nr | head -5 || echo "State data unavailable")
+          
+          cat > ai_analysis_raw.txt << EOF
+# Backlog Analysis Report (Fallback Mode)
+
+## Executive Summary
+This analysis was generated in fallback mode due to AI service limitations. 
+A basic statistical analysis of $WORK_ITEM_COUNT work items has been performed.
+
+## Key Metrics
+- Total Work Items: $WORK_ITEM_COUNT
+- Analysis Mode: $(ANALYSIS_MODE)
+- Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Work Item Distribution by State
+$STATE_SUMMARY
+
+## Recommendations
+1. Review work item distribution and identify bottlenecks
+2. Ensure proper work item grooming and prioritization
+3. Consider implementing automated analysis when AI service is available
+
+## Note
+This fallback analysis provides basic metrics only. 
+For comprehensive AI-powered insights, retry when GitHub Copilot service is available.
+EOF
+          
+          echo "⚠️ Fallback analysis created"
+        fi
+        
+        echo "✅ Analysis phase completed"
+        
+      displayName: 'Execute AI Analysis'
+      env:
+        GITHUB_TOKEN: $(GITHUB_TOKEN)
+        GH_TOKEN: $(GITHUB_TOKEN)
+    
+    - script: |
+        echo "📝 FORMATTING ANALYSIS RESULTS"
+        echo "=============================="
+        
+        # Validate raw analysis exists
+        if [ ! -f ai_analysis_raw.txt ]; then
+          echo "❌ ERROR: Raw analysis file not found"
+          exit 1
+        fi
+        
+        RAW_SIZE=$(wc -c < ai_analysis_raw.txt)
+        echo "📊 Raw analysis size: $RAW_SIZE characters"
+        
+        if [ $RAW_SIZE -eq 0 ]; then
+          echo "❌ ERROR: Empty analysis result"
+          exit 1
+        fi
+        
+        # Create metadata
+        ANALYSIS_METADATA=$(cat << EOF
+{
+  "analysisMode": "$(ANALYSIS_MODE)",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "workItemCount": $(jq '.metadata.count' work_items.json),
+  "organization": $(jq '.metadata.organization' work_items.json),
+  "project": $(jq '.metadata.project' work_items.json),
+  "customPrompt": "$(CUSTOM_PROMPT)",
+  "includeMetrics": $(INCLUDE_METRICS),
+  "generateSummary": $(GENERATE_SUMMARY),
+  "outputFormat": "$(OUTPUT_FORMAT)",
+  "analysisSize": $RAW_SIZE
+}
+EOF
+)
+        
+        # Format outputs based on requested format
+        case "$(OUTPUT_FORMAT)" in
+          "markdown")
+            echo "📝 Generating Markdown output..."
+            
+            # Create markdown report with metadata header
+            cat > analysis_report.md << EOF
+# Backlog Analysis Report
+
+## Analysis Metadata
+$(echo "$ANALYSIS_METADATA" | jq -r 'to_entries[] | "- **\(.key)**: \(.value)"')
+
+## Generated Analysis
+$(cat ai_analysis_raw.txt)
+
+---
+*Generated by GitHub Copilot Backlog Analyzer*  
+*Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)*
+EOF
+            
+            echo "✅ Markdown report created: analysis_report.md"
+            ;;
+          
+          "json")
+            echo "📝 Generating JSON output..."
+            
+            # Create structured JSON output
+            jq -n \
+              --argjson metadata "$ANALYSIS_METADATA" \
+              --arg analysis "$(cat ai_analysis_raw.txt)" \
+              '{
+                metadata: $metadata,
+                analysis: {
+                  raw: $analysis,
+                  format: "text"
+                }
+              }' > analysis_report.json
+            
+            echo "✅ JSON report created: analysis_report.json"
+            ;;
+          
+          "both")
+            echo "📝 Generating both Markdown and JSON outputs..."
+            
+            # Create markdown
+            cat > analysis_report.md << EOF
+# Backlog Analysis Report
+
+## Analysis Metadata
+$(echo "$ANALYSIS_METADATA" | jq -r 'to_entries[] | "- **\(.key)**: \(.value)"')
+
+## Generated Analysis
+$(cat ai_analysis_raw.txt)
+
+---
+*Generated by GitHub Copilot Backlog Analyzer*  
+*Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)*
+EOF
+            
+            # Create JSON
+            jq -n \
+              --argjson metadata "$ANALYSIS_METADATA" \
+              --arg analysis "$(cat ai_analysis_raw.txt)" \
+              '{
+                metadata: $metadata,
+                analysis: {
+                  raw: $analysis,
+                  format: "text"
+                }
+              }' > analysis_report.json
+            
+            echo "✅ Both Markdown and JSON reports created"
+            ;;
+        esac
+        
+        # Generate executive summary if requested
+        if [ "$(GENERATE_SUMMARY)" = "True" ]; then
+          echo "📋 Generating executive summary..."
+          
+          # Extract key points for summary (basic extraction)
+          SUMMARY_CONTENT=$(head -n 20 ai_analysis_raw.txt | grep -E '^(#|##|\*|\-|[0-9]\.|\*\*|Key|Summary|Recommendation|Critical|Important)' | head -10 || echo "Summary extraction not available")
+          
+          cat > executive_summary.md << EOF
+# Executive Summary
+
+## Key Findings
+$SUMMARY_CONTENT
+
+## Analysis Details
+For complete analysis, refer to the full report.
+
+## Metadata
+- Analysis Mode: $(ANALYSIS_MODE)
+- Work Items Analyzed: $(jq '.metadata.count' work_items.json)
+- Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+          
+          echo "✅ Executive summary created: executive_summary.md"
+        fi
+        
+        # Validate outputs
+        echo ""
+        echo "📊 OUTPUT VALIDATION"
+        echo "==================="
+        
+        if [ -f analysis_report.md ]; then
+          MD_SIZE=$(wc -c < analysis_report.md)
+          echo "✅ Markdown report: $MD_SIZE characters"
+        fi
+        
+        if [ -f analysis_report.json ]; then
+          JSON_SIZE=$(wc -c < analysis_report.json)
+          echo "✅ JSON report: $JSON_SIZE characters"
+          
+          # Validate JSON structure
+          if jq empty analysis_report.json 2>/dev/null; then
+            echo "✅ JSON structure valid"
+          else
+            echo "⚠️ JSON structure validation failed"
+          fi
+        fi
+        
+        if [ -f executive_summary.md ]; then
+          SUMMARY_SIZE=$(wc -c < executive_summary.md)
+          echo "✅ Executive summary: $SUMMARY_SIZE characters"
+        fi
+        
+        echo "✅ Analysis formatting completed"
+        
+      displayName: 'Format Analysis Results'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Analysis Report (Markdown)'
+      condition: or(eq(variables['OUTPUT_FORMAT'], 'markdown'), eq(variables['OUTPUT_FORMAT'], 'both'))
+      inputs:
+        pathToPublish: 'analysis_report.md'
+        artifactName: 'AnalysisReportMarkdown'
+        publishLocation: 'Container'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Analysis Report (JSON)'
+      condition: or(eq(variables['OUTPUT_FORMAT'], 'json'), eq(variables['OUTPUT_FORMAT'], 'both'))
+      inputs:
+        pathToPublish: 'analysis_report.json'
+        artifactName: 'AnalysisReportJSON'
+        publishLocation: 'Container'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Executive Summary'
+      condition: eq(variables['GENERATE_SUMMARY'], 'True')
+      inputs:
+        pathToPublish: 'executive_summary.md'
+        artifactName: 'ExecutiveSummary'
+        publishLocation: 'Container'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Raw Analysis'
+      inputs:
+        pathToPublish: 'ai_analysis_raw.txt'
+        artifactName: 'RawAnalysis'
+        publishLocation: 'Container'
+    
+    - script: |
+        echo "📋 AI ANALYSIS TEMPLATE COMPLETION SUMMARY"
+        echo "========================================="
+        echo "✅ Work items data processed successfully"
+        echo "✅ AI analysis executed with $(ANALYSIS_MODE) mode"
+        echo "✅ Results formatted in $(OUTPUT_FORMAT) format"
+        echo "✅ All artifacts published for downstream use"
+        echo ""
+        echo "🔧 Generated Artifacts:"
+        if [ -f analysis_report.md ]; then
+          echo "   - AnalysisReportMarkdown (analysis_report.md)"
+        fi
+        if [ -f analysis_report.json ]; then
+          echo "   - AnalysisReportJSON (analysis_report.json)"
+        fi
+        if [ -f executive_summary.md ]; then
+          echo "   - ExecutiveSummary (executive_summary.md)"
+        fi
+        echo "   - RawAnalysis (ai_analysis_raw.txt)"
+        echo ""
+        echo "💡 Usage in downstream workflows:"
+        echo "   - Download analysis artifacts for reporting"
+        echo "   - Parse JSON output for automated processing"
+        echo "   - Use executive summary for stakeholder communication"
+        echo ""
+        echo "🎯 Analysis complete - Ready for reporting and action!"
+        
+      displayName: 'AI Analysis Complete - Results Ready'

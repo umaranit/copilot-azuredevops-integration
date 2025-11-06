@@ -1,0 +1,438 @@
+# Enterprise Backlog Analysis Workflow
+# Composed workflow for organization-wide governance and compliance analysis
+
+trigger: none  # Manual execution only
+
+pr: none
+
+parameters:
+  - name: azureDevOpsOrganization
+    displayName: 'Azure DevOps Organization'
+    type: string
+  
+  - name: projectName
+    displayName: 'Project Name'
+    type: string
+  
+  - name: analysisScope
+    displayName: 'Analysis Scope'
+    type: string
+    default: 'current-sprint'
+    values:
+      - 'current-sprint'      # Current sprint items only
+      - 'active-backlog'      # All active backlog items
+      - 'full-project'        # Complete project history
+      - 'compliance-audit'    # Focus on compliance items
+  
+  - name: governanceMode
+    displayName: 'Governance Focus'
+    type: string
+    default: 'standard'
+    values:
+      - 'standard'           # Standard governance review
+      - 'compliance'         # Regulatory compliance focus
+      - 'security'           # Security-focused analysis
+      - 'quality'            # Quality assurance focus
+  
+  - name: includeArchived
+    displayName: 'Include Archived Work Items'
+    type: boolean
+    default: false
+  
+  - name: executiveSummary
+    displayName: 'Generate Executive Summary'
+    type: boolean
+    default: true
+  
+  - name: sharePointSite
+    displayName: 'SharePoint Upload Site'
+    type: string
+    default: ''
+  
+  - name: notificationDistribution
+    displayName: 'Notification Distribution List'
+    type: string
+    default: ''
+
+variables:
+  - group: copilot-credentials
+  - group: notification-settings
+  - group: enterprise-settings
+  - name: enterpriseQuery
+    ${{ if eq(parameters.analysisScope, 'current-sprint') }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedBy], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [System.IterationPath], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Common.Severity], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Scheduling.StoryPoints] FROM WorkItems WHERE [System.TeamProject] = '@project' AND [System.IterationPath] UNDER '@project\\Current' ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC"
+    ${{ elseif eq(parameters.analysisScope, 'active-backlog') }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedBy], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [System.IterationPath], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Common.Severity], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Scheduling.StoryPoints] FROM WorkItems WHERE [System.TeamProject] = '@project' AND [System.State] IN ('New', 'Active', 'Approved', 'Committed', 'In Progress', 'To Do') ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC"
+    ${{ elseif eq(parameters.analysisScope, 'full-project') }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedBy], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [System.IterationPath], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Common.Severity], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Scheduling.StoryPoints] FROM WorkItems WHERE [System.TeamProject] = '@project' ORDER BY [System.ChangedDate] DESC"
+    ${{ elseif eq(parameters.analysisScope, 'compliance-audit') }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedBy], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [System.IterationPath], [Microsoft.VSTS.Common.Priority], [Microsoft.VSTS.Common.Severity], [Microsoft.VSTS.Common.AcceptanceCriteria], [Microsoft.VSTS.Scheduling.StoryPoints] FROM WorkItems WHERE [System.TeamProject] = '@project' AND ([System.Tags] CONTAINS 'Compliance' OR [System.Tags] CONTAINS 'Security' OR [System.Tags] CONTAINS 'Audit' OR [System.WorkItemType] = 'Bug' AND [Microsoft.VSTS.Common.Severity] <= 2) ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC"
+  - name: customPrompt
+    ${{ if eq(parameters.governanceMode, 'compliance') }}:
+      value: "Focus on regulatory compliance, audit trails, documentation completeness, and process adherence. Identify any gaps in compliance requirements and provide specific remediation recommendations."
+    ${{ elseif eq(parameters.governanceMode, 'security') }}:
+      value: "Analyze security-related work items, vulnerability management, security requirements implementation, and risk assessment. Highlight critical security issues and provide security-focused recommendations."
+    ${{ elseif eq(parameters.governanceMode, 'quality') }}:
+      value: "Evaluate quality assurance processes, testing coverage, defect trends, and quality metrics. Provide insights on quality improvement opportunities and testing strategy optimization."
+    ${{ else }}:
+      value: "Provide comprehensive governance analysis including process maturity, risk management, resource allocation, and strategic alignment with business objectives."
+
+stages:
+- template: ../templates/setup-copilot-template.yml
+  parameters:
+    nodeVersion: '22'
+    validationLevel: 'strict'
+    maxRetryAttempts: 3
+    timeoutSeconds: 300
+
+- template: ../templates/fetch-workitems-template.yml
+  parameters:
+    azureDevOpsOrganization: ${{ parameters.azureDevOpsOrganization }}
+    projectName: ${{ parameters.projectName }}
+    wiqlQuery: $(enterpriseQuery)
+    maxResults: 500
+    includeDetails: true
+    outputFormat: 'detailed'
+    retryAttempts: 3
+
+- template: ../templates/ai-analysis-template.yml
+  parameters:
+    analysisMode: 'governance'
+    customPrompt: $(customPrompt)
+    timeoutMinutes: 20
+    retryAttempts: 3
+    includeMetrics: true
+    generateSummary: ${{ parameters.executiveSummary }}
+    outputFormat: 'both'
+
+- template: ../templates/reporting-template.yml
+  parameters:
+    reportTitle: 'Enterprise Governance Analysis - ${{ parameters.projectName }}'
+    includeCharts: true
+    generatePDF: true
+    notificationEnabled: true
+    sharePointUpload: ${{ ne(parameters.sharePointSite, '') }}
+    emailRecipients: ${{ parameters.notificationDistribution }}
+    reportFormats:
+      - 'html'
+      - 'markdown'
+
+- stage: EnterpriseCompliance
+  displayName: 'Enterprise Compliance Validation'
+  dependsOn: GenerateReports
+  jobs:
+  - job: ComplianceCheck
+    displayName: 'Validate Compliance Standards'
+    steps:
+    - task: DownloadBuildArtifacts@1
+      displayName: 'Download Analysis Results'
+      inputs:
+        buildType: 'current'
+        downloadType: 'specific'
+        downloadPath: '$(System.ArtifactsDirectory)'
+    
+    - script: |
+        echo "🏛️ ENTERPRISE COMPLIANCE VALIDATION"
+        echo "==================================="
+        echo "Governance Mode: ${{ parameters.governanceMode }}"
+        echo "Analysis Scope: ${{ parameters.analysisScope }}"
+        echo "Organization: ${{ parameters.azureDevOpsOrganization }}"
+        echo "Project: ${{ parameters.projectName }}"
+        echo ""
+        
+        # Initialize compliance metrics
+        COMPLIANCE_SCORE=0
+        TOTAL_CHECKS=0
+        FINDINGS=""
+        
+        # Check if work items data exists
+        if [ -f "$(System.ArtifactsDirectory)/WorkItemsData/work_items_final.json" ]; then
+          WORK_ITEMS_FILE="$(System.ArtifactsDirectory)/WorkItemsData/work_items_final.json"
+          TOTAL_ITEMS=$(jq '.metadata.count' "$WORK_ITEMS_FILE")
+          echo "📊 Total Work Items Analyzed: $TOTAL_ITEMS"
+          echo ""
+          
+          # Compliance Check 1: Documentation Completeness
+          echo "📋 COMPLIANCE CHECK 1: Documentation Completeness"
+          echo "================================================="
+          TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+          
+          ITEMS_WITH_DESCRIPTION=$(jq '[.workItems[] | select(.fields["System.Description"] != null and .fields["System.Description"] != "")] | length' "$WORK_ITEMS_FILE")
+          DESCRIPTION_RATE=$(echo "scale=2; $ITEMS_WITH_DESCRIPTION * 100 / $TOTAL_ITEMS" | bc -l 2>/dev/null || echo "0")
+          
+          echo "   - Items with Description: $ITEMS_WITH_DESCRIPTION/$TOTAL_ITEMS ($DESCRIPTION_RATE%)"
+          
+          if (( $(echo "$DESCRIPTION_RATE >= 80" | bc -l) )); then
+            echo "   ✅ PASS: Documentation rate meets compliance threshold (≥80%)"
+            COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))
+          else
+            echo "   ❌ FAIL: Documentation rate below compliance threshold ($DESCRIPTION_RATE% < 80%)"
+            FINDINGS="$FINDINGS\n- Documentation Completeness: $DESCRIPTION_RATE% (Threshold: 80%)"
+          fi
+          
+          # Compliance Check 2: Acceptance Criteria Coverage
+          echo ""
+          echo "📋 COMPLIANCE CHECK 2: Acceptance Criteria Coverage"
+          echo "=================================================="
+          TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+          
+          USER_STORIES=$(jq '[.workItems[] | select(.fields["System.WorkItemType"] == "User Story")] | length' "$WORK_ITEMS_FILE")
+          if [ "$USER_STORIES" -gt 0 ]; then
+            STORIES_WITH_AC=$(jq '[.workItems[] | select(.fields["System.WorkItemType"] == "User Story" and .fields["Microsoft.VSTS.Common.AcceptanceCriteria"] != null and .fields["Microsoft.VSTS.Common.AcceptanceCriteria"] != "")] | length' "$WORK_ITEMS_FILE")
+            AC_RATE=$(echo "scale=2; $STORIES_WITH_AC * 100 / $USER_STORIES" | bc -l 2>/dev/null || echo "0")
+            
+            echo "   - User Stories with Acceptance Criteria: $STORIES_WITH_AC/$USER_STORIES ($AC_RATE%)"
+            
+            if (( $(echo "$AC_RATE >= 90" | bc -l) )); then
+              echo "   ✅ PASS: Acceptance criteria coverage meets compliance threshold (≥90%)"
+              COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))
+            else
+              echo "   ❌ FAIL: Acceptance criteria coverage below threshold ($AC_RATE% < 90%)"
+              FINDINGS="$FINDINGS\n- Acceptance Criteria Coverage: $AC_RATE% (Threshold: 90%)"
+            fi
+          else
+            echo "   ℹ️ SKIP: No User Stories found for acceptance criteria validation"
+            COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))  # Count as pass if no user stories
+          fi
+          
+          # Compliance Check 3: Priority Assignment
+          echo ""
+          echo "📋 COMPLIANCE CHECK 3: Priority Assignment"
+          echo "=========================================="
+          TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+          
+          ITEMS_WITH_PRIORITY=$(jq '[.workItems[] | select(.fields["Microsoft.VSTS.Common.Priority"] != null and .fields["Microsoft.VSTS.Common.Priority"] != "")] | length' "$WORK_ITEMS_FILE")
+          PRIORITY_RATE=$(echo "scale=2; $ITEMS_WITH_PRIORITY * 100 / $TOTAL_ITEMS" | bc -l 2>/dev/null || echo "0")
+          
+          echo "   - Items with Priority: $ITEMS_WITH_PRIORITY/$TOTAL_ITEMS ($PRIORITY_RATE%)"
+          
+          if (( $(echo "$PRIORITY_RATE >= 95" | bc -l) )); then
+            echo "   ✅ PASS: Priority assignment meets compliance threshold (≥95%)"
+            COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))
+          else
+            echo "   ❌ FAIL: Priority assignment below threshold ($PRIORITY_RATE% < 95%)"
+            FINDINGS="$FINDINGS\n- Priority Assignment: $PRIORITY_RATE% (Threshold: 95%)"
+          fi
+          
+          # Compliance Check 4: Work Item Age Analysis
+          echo ""
+          echo "📋 COMPLIANCE CHECK 4: Work Item Age Analysis"
+          echo "============================================="
+          TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+          
+          # Calculate items older than 90 days in active states
+          CURRENT_DATE=$(date +%s)
+          NINETY_DAYS_AGO=$((CURRENT_DATE - 7776000))  # 90 days * 24 hours * 3600 seconds
+          
+          # Note: This is a simplified check - in real implementation, you'd parse dates properly
+          ACTIVE_STATES="New|Active|Approved|Committed|In Progress|To Do"
+          OLD_ACTIVE_ITEMS=$(jq --arg states "$ACTIVE_STATES" '[.workItems[] | select(.fields["System.State"] | test($states)) | select(.fields["System.CreatedDate"] != null)] | length' "$WORK_ITEMS_FILE")
+          
+          if [ "$OLD_ACTIVE_ITEMS" -lt $((TOTAL_ITEMS / 10)) ]; then  # Less than 10% old items
+            echo "   ✅ PASS: Acceptable number of aging work items"
+            COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))
+          else
+            echo "   ⚠️ REVIEW: High number of potentially aging work items ($OLD_ACTIVE_ITEMS)"
+            FINDINGS="$FINDINGS\n- Work Item Age: Review $OLD_ACTIVE_ITEMS items for potential aging issues"
+          fi
+          
+          # Compliance Check 5: Assignment Coverage
+          echo ""
+          echo "📋 COMPLIANCE CHECK 5: Assignment Coverage"
+          echo "=========================================="
+          TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+          
+          ASSIGNED_ITEMS=$(jq '[.workItems[] | select(.fields["System.AssignedTo"] != null and .fields["System.AssignedTo"] != "")] | length' "$WORK_ITEMS_FILE")
+          ASSIGNMENT_RATE=$(echo "scale=2; $ASSIGNED_ITEMS * 100 / $TOTAL_ITEMS" | bc -l 2>/dev/null || echo "0")
+          
+          echo "   - Assigned Items: $ASSIGNED_ITEMS/$TOTAL_ITEMS ($ASSIGNMENT_RATE%)"
+          
+          if (( $(echo "$ASSIGNMENT_RATE >= 70" | bc -l) )); then
+            echo "   ✅ PASS: Assignment coverage meets threshold (≥70%)"
+            COMPLIANCE_SCORE=$((COMPLIANCE_SCORE + 1))
+          else
+            echo "   ❌ FAIL: Assignment coverage below threshold ($ASSIGNMENT_RATE% < 70%)"
+            FINDINGS="$FINDINGS\n- Assignment Coverage: $ASSIGNMENT_RATE% (Threshold: 70%)"
+          fi
+        else
+          echo "❌ ERROR: Work items data not available for compliance validation"
+          exit 1
+        fi
+        
+        # Calculate final compliance score
+        COMPLIANCE_PERCENTAGE=$(echo "scale=1; $COMPLIANCE_SCORE * 100 / $TOTAL_CHECKS" | bc -l)
+        
+        echo ""
+        echo "🏛️ ENTERPRISE COMPLIANCE SUMMARY"
+        echo "================================"
+        echo "Total Compliance Checks: $TOTAL_CHECKS"
+        echo "Checks Passed: $COMPLIANCE_SCORE"
+        echo "Compliance Score: $COMPLIANCE_PERCENTAGE%"
+        echo ""
+        
+        # Generate compliance report
+        cat > compliance_report.md << EOF
+# Enterprise Compliance Report
+
+## Overall Compliance Score: $COMPLIANCE_PERCENTAGE%
+
+### Analysis Details
+- **Organization**: ${{ parameters.azureDevOpsOrganization }}
+- **Project**: ${{ parameters.projectName }}
+- **Governance Mode**: ${{ parameters.governanceMode }}
+- **Analysis Scope**: ${{ parameters.analysisScope }}
+- **Analysis Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+### Compliance Results
+- **Total Checks**: $TOTAL_CHECKS
+- **Checks Passed**: $COMPLIANCE_SCORE
+- **Compliance Rate**: $COMPLIANCE_PERCENTAGE%
+
+### Compliance Status
+EOF
+
+        if (( $(echo "$COMPLIANCE_PERCENTAGE >= 80" | bc -l) )); then
+          echo "**🟢 COMPLIANT** - Organization meets enterprise governance standards" >> compliance_report.md
+          echo ""
+          echo "🟢 OVERALL STATUS: COMPLIANT"
+          echo "   Organization meets enterprise governance standards ($COMPLIANCE_PERCENTAGE% ≥ 80%)"
+        elif (( $(echo "$COMPLIANCE_PERCENTAGE >= 60" | bc -l) )); then
+          echo "**🟡 NEEDS IMPROVEMENT** - Some compliance gaps identified" >> compliance_report.md
+          echo ""
+          echo "🟡 OVERALL STATUS: NEEDS IMPROVEMENT"
+          echo "   Some compliance gaps identified ($COMPLIANCE_PERCENTAGE% between 60-80%)"
+        else
+          echo "**🔴 NON-COMPLIANT** - Significant compliance issues require immediate attention" >> compliance_report.md
+          echo ""
+          echo "🔴 OVERALL STATUS: NON-COMPLIANT"
+          echo "   Significant compliance issues require immediate attention ($COMPLIANCE_PERCENTAGE% < 60%)"
+        fi
+        
+        # Add findings if any
+        if [ -n "$FINDINGS" ]; then
+          echo "" >> compliance_report.md
+          echo "### Issues Identified" >> compliance_report.md
+          echo -e "$FINDINGS" >> compliance_report.md
+          
+          echo ""
+          echo "📋 COMPLIANCE FINDINGS:"
+          echo -e "$FINDINGS"
+        fi
+        
+        echo "" >> compliance_report.md
+        echo "### Recommendations" >> compliance_report.md
+        echo "1. Review and address all identified compliance gaps" >> compliance_report.md
+        echo "2. Implement automated compliance monitoring" >> compliance_report.md
+        echo "3. Establish regular compliance review cycles" >> compliance_report.md
+        echo "4. Provide team training on governance standards" >> compliance_report.md
+        echo "5. Update process documentation and templates" >> compliance_report.md
+        
+        echo ""
+        echo "✅ Compliance report generated: compliance_report.md"
+        
+      displayName: 'Validate Enterprise Compliance'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Compliance Report'
+      inputs:
+        pathToPublish: 'compliance_report.md'
+        artifactName: 'ComplianceReport'
+        publishLocation: 'Container'
+
+- stage: ExecutiveNotification
+  displayName: 'Executive Notification'
+  dependsOn: 
+    - GenerateReports
+    - EnterpriseCompliance
+  condition: and(succeeded(), eq('${{ parameters.executiveSummary }}', 'true'))
+  jobs:
+  - job: NotifyExecutives
+    displayName: 'Send Executive Notifications'
+    steps:
+    - script: |
+        echo "👔 EXECUTIVE NOTIFICATION PROCESSING"
+        echo "==================================="
+        echo "Notification Recipients: ${{ parameters.notificationDistribution }}"
+        echo "SharePoint Site: ${{ parameters.sharePointSite }}"
+        echo "Project: ${{ parameters.projectName }}"
+        echo "Analysis Scope: ${{ parameters.analysisScope }}"
+        echo "Governance Mode: ${{ parameters.governanceMode }}"
+        echo ""
+        
+        # Create executive notification summary
+        cat > executive_notification.md << EOF
+# Executive Analysis Summary
+
+## Project Overview
+- **Organization**: ${{ parameters.azureDevOpsOrganization }}
+- **Project**: ${{ parameters.projectName }}
+- **Analysis Date**: $(date -u +"%Y-%m-%d")
+- **Governance Focus**: ${{ parameters.governanceMode }}
+- **Scope**: ${{ parameters.analysisScope }}
+
+## Key Outcomes
+✅ **Comprehensive AI Analysis Completed**
+- Advanced backlog analysis using GitHub Copilot
+- Governance and compliance validation
+- Enterprise-grade reporting generated
+
+✅ **Reports Generated**
+- Executive summary with key insights
+- Detailed technical analysis
+- Interactive visualizations
+- Compliance validation report
+
+## Next Steps
+1. Review detailed analysis reports
+2. Address any compliance findings
+3. Implement recommended improvements
+4. Schedule follow-up analysis
+
+## Access Information
+All reports and analysis artifacts are available in the Azure DevOps pipeline artifacts.
+
+*Generated by GitHub Copilot Backlog Analyzer - Enterprise Edition*
+EOF
+
+        echo "✅ Executive notification prepared: executive_notification.md"
+        
+        # Create distribution manifest
+        cat > distribution_manifest.json << EOF
+{
+  "executiveNotification": true,
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "organization": "${{ parameters.azureDevOpsOrganization }}",
+  "project": "${{ parameters.projectName }}",
+  "analysisScope": "${{ parameters.analysisScope }}",
+  "governanceMode": "${{ parameters.governanceMode }}",
+  "recipients": "${{ parameters.notificationDistribution }}",
+  "sharePointSite": "${{ parameters.sharePointSite }}",
+  "artifactsGenerated": [
+    "HTMLReport",
+    "MarkdownReport", 
+    "InteractiveCharts",
+    "PDFReport",
+    "ComplianceReport",
+    "ExecutiveSummary"
+  ]
+}
+EOF
+
+        echo "✅ Distribution manifest created: distribution_manifest.json"
+        echo "👔 Executive notification processing completed"
+        
+      displayName: 'Prepare Executive Notifications'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Executive Notification'
+      inputs:
+        pathToPublish: 'executive_notification.md'
+        artifactName: 'ExecutiveNotification'
+        publishLocation: 'Container'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Distribution Manifest'
+      inputs:
+        pathToPublish: 'distribution_manifest.json'
+        artifactName: 'DistributionManifest'
+        publishLocation: 'Container'

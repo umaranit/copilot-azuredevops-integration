@@ -1,0 +1,88 @@
+# Standard Backlog Analysis Workflow
+# Composed workflow for comprehensive team-level analysis
+
+trigger:
+- main
+
+pr: none
+
+parameters:
+  - name: azureDevOpsOrganization
+    displayName: 'Azure DevOps Organization'
+    type: string
+  
+  - name: projectName
+    displayName: 'Project Name'
+    type: string
+  
+  - name: maxWorkItems
+    displayName: 'Maximum Work Items to Analyze'
+    type: number
+    default: 200
+  
+  - name: analysisMode
+    displayName: 'Analysis Depth'
+    type: string
+    default: 'standard'
+    values:
+      - 'basic'
+      - 'standard'
+      - 'detailed'
+  
+  - name: includeClosedItems
+    displayName: 'Include Closed Work Items'
+    type: boolean
+    default: false
+  
+  - name: emailRecipients
+    displayName: 'Email Recipients'
+    type: string
+    default: ''
+
+variables:
+  - group: copilot-credentials
+  - group: notification-settings
+  - name: wiqlQuery
+    ${{ if eq(parameters.includeClosedItems, true) }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [Microsoft.VSTS.Common.Priority] FROM WorkItems WHERE [System.TeamProject] = '@project' ORDER BY [System.ChangedDate] DESC"
+    ${{ else }}:
+      value: "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.AssignedTo], [System.CreatedDate], [System.ChangedDate], [System.WorkItemType], [System.Tags], [System.AreaPath], [Microsoft.VSTS.Common.Priority] FROM WorkItems WHERE [System.TeamProject] = '@project' AND [System.State] <> 'Closed' AND [System.State] <> 'Done' ORDER BY [System.ChangedDate] DESC"
+
+stages:
+- template: ../templates/setup-copilot-template.yml
+  parameters:
+    nodeVersion: '22'
+    validationLevel: 'standard'
+    maxRetryAttempts: 3
+    timeoutSeconds: 300
+
+- template: ../templates/fetch-workitems-template.yml
+  parameters:
+    azureDevOpsOrganization: ${{ parameters.azureDevOpsOrganization }}
+    projectName: ${{ parameters.projectName }}
+    wiqlQuery: $(wiqlQuery)
+    maxResults: ${{ parameters.maxWorkItems }}
+    includeDetails: true
+    outputFormat: 'detailed'
+    retryAttempts: 3
+
+- template: ../templates/ai-analysis-template.yml
+  parameters:
+    analysisMode: ${{ parameters.analysisMode }}
+    timeoutMinutes: 15
+    retryAttempts: 2
+    includeMetrics: true
+    generateSummary: true
+    outputFormat: 'both'
+
+- template: ../templates/reporting-template.yml
+  parameters:
+    reportTitle: 'Standard Backlog Analysis - ${{ parameters.projectName }}'
+    includeCharts: true
+    generatePDF: true
+    notificationEnabled: true
+    sharePointUpload: false
+    emailRecipients: ${{ parameters.emailRecipients }}
+    reportFormats:
+      - 'html'
+      - 'markdown'
