@@ -1,5 +1,5 @@
-# GitHub Copilot + Azure DevOps Backlog Analyzer - Quick Setup
-# One command to get everything working!
+# GitHub Copilot + Azure DevOps Backlog Analyzer - Credential Setup
+# Sets up the required variable group with GitHub token
 
 param(
     [Parameter(Mandatory=$true)]
@@ -12,7 +12,7 @@ param(
     [string]$GitHubToken
 )
 
-Write-Host "🚀 Setting up GitHub Copilot Backlog Analyzer..." -ForegroundColor Green
+Write-Host "🔐 Setting up GitHub Copilot credentials..." -ForegroundColor Green
 Write-Host ""
 
 # Validate Azure DevOps CLI is installed
@@ -38,28 +38,26 @@ if (-not $variableGroupExists) {
     Write-Host "✅ Created variable group 'copilot-credentials'" -ForegroundColor Green
 } else {
     Write-Host "ℹ️ Variable group 'copilot-credentials' already exists" -ForegroundColor Yellow
-    Write-Host "💡 You may need to update the GITHUB_TOKEN manually" -ForegroundColor Yellow
-}
-
-# Create the pipeline
-Write-Host "📥 Creating pipeline..."
-$pipelineName = "Copilot-Backlog-Analyzer"
-try {
-    $null = az pipelines create --name $pipelineName --yml-path "backlog-analyzer.yml" --repository . --repository-type tfsgit
-    Write-Host "✅ Pipeline '$pipelineName' created successfully" -ForegroundColor Green
-} catch {
-    Write-Host "ℹ️ Pipeline may already exist or there was an issue creating it" -ForegroundColor Yellow
-    Write-Host "💡 You can manually import 'backlog-analyzer.yml' in Azure DevOps" -ForegroundColor Yellow
+    Write-Host "💡 Updating GitHub token..." -ForegroundColor Yellow
+    $groupId = az pipelines variable-group list --query "[?name=='copilot-credentials'].id" --output tsv
+    $null = az pipelines variable-group variable update --group-id $groupId --name GITHUB_TOKEN --value $GitHubToken
+    Write-Host "✅ Updated GitHub token in existing variable group" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "🎉 Setup Complete!" -ForegroundColor Green
+Write-Host "✅ Credentials Setup Complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
+Write-Host "🎯 Next Steps:" -ForegroundColor Cyan
 Write-Host "1. Go to: https://dev.azure.com/$Organization/$Project/_build"
-Write-Host "2. Find your '$pipelineName' pipeline"
-Write-Host "3. Click 'Run Pipeline'"
-Write-Host "4. Set 'projectName' to '$Project' (or your actual project name)"
-Write-Host "5. Click 'Run' and watch the AI analyze your backlog!"
+Write-Host "2. Click 'New Pipeline'"
+Write-Host "3. Choose your source (Azure Repos Git, GitHub, etc.)"
+Write-Host "4. Select 'Existing Azure Pipelines YAML file'"
+Write-Host "5. Choose 'backlog-analyzer.yml'"
+Write-Host "6. Save & Run the pipeline"
 Write-Host ""
-Write-Host "💡 Tip: Start with 5-10 work items for your first run" -ForegroundColor Yellow
+Write-Host "⚙️ Pipeline Parameters:" -ForegroundColor Yellow
+Write-Host "- Project Name: '$Project'"
+Write-Host "- Work Items: Start with 5-10 for testing"
+Write-Host "- Analysis Mode: 'standard'"
+Write-Host ""
+Write-Host "🔗 Direct link: https://dev.azure.com/$Organization/$Project/_build" -ForegroundColor Cyan
