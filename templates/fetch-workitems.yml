@@ -6,7 +6,7 @@ parameters:
     type: string
   - name: workItemTypes
     type: string
-    default: 'User Story,Product Backlog Item'
+    default: 'Product Backlog Item'
   - name: maxItems
     type: number
     default: 20
@@ -29,16 +29,22 @@ steps:
     echo "Query Type: ${{ parameters.queryType }}"
     echo "Max Items: ${{ parameters.maxItems }}"
     
+    # Process work item types parameter (convert comma-separated to WIQL format)
+    WORK_ITEM_TYPES="${{ parameters.workItemTypes }}"
+    # Convert "Type1,Type2" to "'Type1','Type2'"
+    FORMATTED_TYPES=$(echo "$WORK_ITEM_TYPES" | sed "s/,/','/g" | sed "s/^/'/" | sed "s/$/'/")
+    echo "📝 Work Item Types: $FORMATTED_TYPES"
+    
     # Build WIQL query based on type
     case "${{ parameters.queryType }}" in
       "backlog")
-        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.State] NOT IN ('Closed', 'Done', 'Removed') ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC"
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ($FORMATTED_TYPES) AND [System.State] IN ('New', 'In Progress', 'To Do') ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC"
         ;;
       "sprint")
-        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.IterationPath] = @currentIteration ORDER BY [System.State] ASC"
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ($FORMATTED_TYPES) AND [System.IterationPath] = @currentIteration ORDER BY [System.State] ASC"
         ;;
       "recent")
-        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.ChangedDate] >= @today - 30 ORDER BY [System.ChangedDate] DESC"
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ($FORMATTED_TYPES) AND [System.ChangedDate] >= @today - 30 ORDER BY [System.ChangedDate] DESC"
         ;;
       "custom")
         WIQL_QUERY="${{ parameters.customQuery }}"
@@ -85,12 +91,81 @@ steps:
     PROJECT_NAME_ENCODED="${{ replace(parameters.projectName, ' ', '%20') }}"
     WIQL_URL="$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/wiql?api-version=7.0"
     
+    # Create output directory early
+    mkdir -p $(Agent.TempDirectory)/workitems-data
+    
     # Create query payload
     echo "{\"query\": \"$WIQL_QUERY\"}" > query_payload.json
     
-    if call_api_with_retry "$WIQL_URL" "workitem_ids.json"; then
+    # Debug: Let's see what work item types and states actually exist
+    echo "🔍 Debug: Checking actual work item types and states in project..."
+    DEBUG_QUERY="SELECT [System.Id] FROM workitems WHERE [System.TeamProject] = '${{ parameters.projectName }}'"
+    echo "{\"query\": \"$DEBUG_QUERY\"}" > debug_query.json
+    
+    echo "📞 Debug API call..."
+    if curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+       --connect-timeout 30 --max-time 30 \
+       "$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/wiql?api-version=7.0" \
+       -d @debug_query.json -H "Content-Type: application/json" > debug_results.json; then
+      
+      # Get the IDs and then fetch the actual work items with their fields
+      DEBUG_IDS=$(cat debug_results.json | jq -r '.workItems[:10] | map(.id) | join(",")' 2>/dev/null)
+      
+      if [ ! -z "$DEBUG_IDS" ] && [ "$DEBUG_IDS" != "null" ]; then
+        echo "📋 Found work item IDs: $DEBUG_IDS"
+        
+        # Fetch the actual work items with their fields
+        DEBUG_DETAILS_URL="$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/workitems?ids=${DEBUG_IDS}&\$expand=all&api-version=7.0"
+        
+        if curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+           --connect-timeout 30 --max-time 30 "$DEBUG_DETAILS_URL" > debug_details.json; then
+          
+          echo "📋 Available Work Item Types in project:"
+          cat debug_details.json | jq -r '.value[]?.fields."System.WorkItemType"' 2>/dev/null | sort | uniq || echo "No types found"
+          
+          echo "📋 Available States in project:"  
+          cat debug_details.json | jq -r '.value[]?.fields."System.State"' 2>/dev/null | sort | uniq || echo "No states found"
+          
+          echo "📋 Work Item Type + State combinations:"
+          cat debug_details.json | jq -r '.value[]? | "\(.fields."System.WorkItemType") - \(.fields."System.State")"' 2>/dev/null | sort | uniq || echo "No combinations found"
+        else
+          echo "❌ Failed to fetch work item details for debug"
+        fi
+      else
+        echo "⚠️ No work items found in project for debugging"
+      fi
+    else
+      echo "❌ Debug query failed"
+    fi
+    echo ""
+    
+    if curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+       --connect-timeout 30 --max-time 30 \
+       "$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/wiql?api-version=7.0" \
+       -d @query_payload.json -H "Content-Type: application/json" > workitem_ids.json; then
       TOTAL_ITEMS=$(cat workitem_ids.json | jq '.workItems | length')
       echo "📋 Found $TOTAL_ITEMS work items"
+      
+      # Debug: Let's see what the actual query response looks like
+      echo "🔍 Debug: Main query response:"
+      cat workitem_ids.json | jq . 2>/dev/null || echo "Failed to parse JSON"
+      
+      # Debug: Let's try a simpler query to see if we can find the specific item
+      echo "🔍 Debug: Testing simpler query for Product Backlog Item with New state..."
+      SIMPLE_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] = 'Product Backlog Item' AND [System.State] = 'New'"
+      echo "{\"query\": \"$SIMPLE_QUERY\"}" > simple_query.json
+      
+      if curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+         --connect-timeout 30 --max-time 30 \
+         "$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/wiql?api-version=7.0" \
+         -d @simple_query.json -H "Content-Type: application/json" > simple_results.json; then
+        
+        SIMPLE_ITEMS=$(cat simple_results.json | jq '.workItems | length')
+        echo "📋 Simple query found: $SIMPLE_ITEMS items"
+        cat simple_results.json | jq . 2>/dev/null || echo "Failed to parse simple query JSON"
+      else
+        echo "❌ Simple query failed"
+      fi
       
       if [ "$TOTAL_ITEMS" -gt 0 ]; then
         # Get limited set based on maxItems
@@ -102,27 +177,24 @@ steps:
         
         if call_api_with_retry "$DETAILS_URL" "workitems_detailed.json"; then
           echo "✅ Successfully fetched $ITEMS_TO_FETCH work items"
-          
-          # Create output directory
-          mkdir -p $(Agent.TempDirectory)/workitems-data
           cp workitems_detailed.json $(Agent.TempDirectory)/workitems-data/
-          
-          # Create metadata
-          echo "{" > $(Agent.TempDirectory)/workitems-data/metadata.json
-          echo "  \"query_type\": \"${{ parameters.queryType }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
-          echo "  \"project\": \"${{ parameters.projectName }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
-          echo "  \"total_available\": $TOTAL_ITEMS," >> $(Agent.TempDirectory)/workitems-data/metadata.json
-          echo "  \"items_fetched\": $ITEMS_TO_FETCH" >> $(Agent.TempDirectory)/workitems-data/metadata.json
-          echo "}" >> $(Agent.TempDirectory)/workitems-data/metadata.json
-          
         else
           echo "❌ Failed to fetch work item details"
           exit 1
         fi
       else
-        echo "⚠️ No work items found"
+        echo "⚠️ No work items found - creating empty result set"
         echo '{"value": []}' > $(Agent.TempDirectory)/workitems-data/workitems_detailed.json
       fi
+      
+      # Create metadata (always, even for empty results)
+      echo "{" > $(Agent.TempDirectory)/workitems-data/metadata.json
+      echo "  \"query_type\": \"${{ parameters.queryType }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+      echo "  \"project\": \"${{ parameters.projectName }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+      echo "  \"total_available\": $TOTAL_ITEMS," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+      echo "  \"items_fetched\": ${ITEMS_TO_FETCH:-0}" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+      echo "}" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+      
     else
       echo "❌ Failed to execute WIQL query"
       exit 1
