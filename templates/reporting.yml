@@ -1,0 +1,164 @@
+# ⚡ Reusable Template: Reporting & Artifacts
+# Generate comprehensive reports and publish build artifacts
+
+parameters:
+  - name: reportType
+    type: string
+    default: 'comprehensive'
+    values:
+      - 'summary'      # High-level summary only
+      - 'comprehensive' # Full detailed report
+      - 'executive'    # Executive summary with metrics
+  - name: includeMetrics
+    type: boolean
+    default: true
+  - name: includeCharts
+    type: boolean
+    default: false
+
+steps:
+- script: |
+    echo "📊 Generating Reports & Artifacts (Template v1.0)"
+    echo "Report Type: ${{ parameters.reportType }}"
+    echo "Include Metrics: ${{ parameters.includeMetrics }}"
+    echo "Include Charts: ${{ parameters.includeCharts }}"
+    
+    # Create reports directory
+    REPORTS_DIR="$(Agent.TempDirectory)/reports"
+    mkdir -p "$REPORTS_DIR"
+    
+    # Check for analysis report
+    ANALYSIS_REPORT="$(Agent.TempDirectory)/analysis-report.md"
+    WORKITEMS_FILE="$(Agent.TempDirectory)/workitems-data/workitems_detailed.json"
+    
+    if [ ! -f "$ANALYSIS_REPORT" ]; then
+      echo "❌ Analysis report not found. Skipping report generation."
+      exit 1
+    fi
+    
+    # Generate comprehensive report
+    FINAL_REPORT="$REPORTS_DIR/final-report.md"
+    
+    case "${{ parameters.reportType }}" in
+      "summary")
+        echo "# 📊 Analysis Summary Report" > "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        
+        # Extract summary section only
+        if grep -A 20 "## 📊 Analysis Summary" "$ANALYSIS_REPORT" >> "$FINAL_REPORT"; then
+          echo "✅ Summary report generated"
+        else
+          echo "⚠️ No summary found in analysis report"
+        fi
+        ;;
+        
+      "executive")
+        echo "# 🎯 Executive Summary" > "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        echo "**Report Date:** $(date '+%Y-%m-%d')" >> "$FINAL_REPORT"
+        echo "**Analysis Type:** Backlog Quality Assessment" >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        
+        # Add metrics if available
+        if [ "${{ parameters.includeMetrics }}" = "true" ] && [ -f "$WORKITEMS_FILE" ]; then
+          TOTAL_ITEMS=$(cat "$WORKITEMS_FILE" | jq '.value | length')
+          echo "## 📈 Key Metrics" >> "$FINAL_REPORT"
+          echo "" >> "$FINAL_REPORT"
+          echo "- **Total Work Items Analyzed:** $TOTAL_ITEMS" >> "$FINAL_REPORT"
+          echo "- **Analysis Completion Rate:** See detailed report" >> "$FINAL_REPORT"
+          echo "" >> "$FINAL_REPORT"
+        fi
+        
+        # Add executive summary
+        echo "## 🎯 Executive Summary" >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        echo "This report provides an AI-powered analysis of your Azure DevOps backlog items using GitHub Copilot CLI." >> "$FINAL_REPORT"
+        echo "The analysis focuses on work item quality, INVEST principles compliance, and actionable recommendations." >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        
+        # Include summary from analysis
+        if grep -A 10 "## 📊 Analysis Summary" "$ANALYSIS_REPORT" >> "$FINAL_REPORT"; then
+          echo "✅ Executive report generated"
+        fi
+        ;;
+        
+      *)
+        # Comprehensive report (default)
+        echo "# 📊 Comprehensive Analysis Report" > "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$FINAL_REPORT"
+        echo "**Tool:** GitHub Copilot CLI + Azure DevOps Integration" >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        
+        # Add metrics section if enabled
+        if [ "${{ parameters.includeMetrics }}" = "true" ] && [ -f "$WORKITEMS_FILE" ]; then
+          TOTAL_ITEMS=$(cat "$WORKITEMS_FILE" | jq '.value | length')
+          echo "## 📈 Analysis Metrics" >> "$FINAL_REPORT"
+          echo "" >> "$FINAL_REPORT"
+          echo "- **Total Work Items:** $TOTAL_ITEMS" >> "$FINAL_REPORT"
+          echo "- **Analysis Date:** $(date '+%Y-%m-%d')" >> "$FINAL_REPORT"
+          echo "- **Tool Version:** GitHub Copilot CLI v$(copilot --version 2>/dev/null || echo 'Unknown')" >> "$FINAL_REPORT"
+          echo "" >> "$FINAL_REPORT"
+        fi
+        
+        # Include full analysis report
+        echo "---" >> "$FINAL_REPORT"
+        echo "" >> "$FINAL_REPORT"
+        cat "$ANALYSIS_REPORT" >> "$FINAL_REPORT"
+        
+        echo "✅ Comprehensive report generated"
+        ;;
+    esac
+    
+    # Generate additional artifacts
+    if [ -f "$WORKITEMS_FILE" ]; then
+      # Create CSV summary for easy consumption
+      CSV_FILE="$REPORTS_DIR/workitems-summary.csv"
+      echo "ID,Title,Type,State" > "$CSV_FILE"
+      
+      cat "$WORKITEMS_FILE" | jq -r '.value[] | [.id, (.fields."System.Title" // "No Title"), (.fields."System.WorkItemType" // "Unknown"), (.fields."System.State" // "Unknown")] | @csv' >> "$CSV_FILE"
+      
+      echo "✅ CSV summary generated: $CSV_FILE"
+    fi
+    
+    # Copy analysis report to final location
+    cp "$ANALYSIS_REPORT" "$REPORTS_DIR/detailed-analysis.md"
+    
+    # Generate manifest
+    MANIFEST_FILE="$REPORTS_DIR/manifest.json"
+    echo "{" > "$MANIFEST_FILE"
+    echo "  \"reportType\": \"${{ parameters.reportType }}\"," >> "$MANIFEST_FILE"
+    echo "  \"generatedAt\": \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\"," >> "$MANIFEST_FILE"
+    echo "  \"includeMetrics\": ${{ parameters.includeMetrics }}," >> "$MANIFEST_FILE"
+    echo "  \"includeCharts\": ${{ parameters.includeCharts }}," >> "$MANIFEST_FILE"
+    echo "  \"artifacts\": [" >> "$MANIFEST_FILE"
+    echo "    \"final-report.md\"," >> "$MANIFEST_FILE"
+    echo "    \"detailed-analysis.md\"" >> "$MANIFEST_FILE"
+    if [ -f "$REPORTS_DIR/workitems-summary.csv" ]; then
+      echo "    ,\"workitems-summary.csv\"" >> "$MANIFEST_FILE"
+    fi
+    echo "  ]" >> "$MANIFEST_FILE"
+    echo "}" >> "$MANIFEST_FILE"
+    
+    echo "📋 Report generation complete!"
+    echo "📁 Reports directory: $REPORTS_DIR"
+    ls -la "$REPORTS_DIR"
+    
+  displayName: 'Generate Reports & Artifacts'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Final Report'
+  inputs:
+    pathToPublish: '$(Agent.TempDirectory)/reports'
+    artifactName: 'analysis-reports'
+
+- task: PublishTestResults@2
+  displayName: 'Publish Analysis Summary'
+  condition: and(succeeded(), eq('${{ parameters.includeMetrics }}', 'true'))
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: '$(Agent.TempDirectory)/reports/manifest.json'
+    testRunTitle: 'Backlog Analysis Summary'
+  continueOnError: true

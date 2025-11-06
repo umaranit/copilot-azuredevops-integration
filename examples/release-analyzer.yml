@@ -1,0 +1,88 @@
+# 🎯 Release Analyzer - AI-Powered Release Readiness Assessment
+# Uses modular templates to analyze release readiness across multiple sprints
+
+trigger: none
+
+variables:
+  - group: copilot-credentials
+
+parameters:
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'MyProject'
+  - name: releaseVersion
+    displayName: 'Release Version'
+    type: string
+    default: 'v1.0'
+  - name: targetState
+    displayName: 'Target Work Item State'
+    type: string
+    default: 'Done'
+    values:
+      - Active
+      - Resolved
+      - Done
+      - Closed
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Setup
+  displayName: '🔧 Setup & Environment'
+  jobs:
+  - job: SetupJob
+    displayName: 'Setup Release Analysis Environment'
+    steps:
+    - template: templates/setup-copilot.yml
+      parameters:
+        validateGitHubToken: true
+        installAdditionalTools: true
+
+- stage: FetchReleaseData
+  displayName: '📋 Fetch Release Work Items'
+  dependsOn: Setup
+  jobs:
+  - job: FetchReleaseItems
+    displayName: 'Fetch Release Work Items'
+    steps:
+    - template: templates/fetch-workitems.yml
+      parameters:
+        queryType: 'release'
+        projectName: '${{ parameters.projectName }}'
+        additionalFilters: 'AND [System.Tags] CONTAINS "${{ parameters.releaseVersion }}" OR [Custom.TargetRelease] = "${{ parameters.releaseVersion }}"'
+        includeFields:
+          - 'System.Title'
+          - 'System.Description'
+          - 'System.State'
+          - 'System.Tags'
+          - 'Microsoft.VSTS.Scheduling.StoryPoints'
+          - 'Microsoft.VSTS.Common.Priority'
+          - 'Custom.TargetRelease'
+        fetchDetails: true
+
+- stage: AnalyzeReleaseReadiness
+  displayName: '🚀 AI Release Readiness Analysis'
+  dependsOn: FetchReleaseData
+  jobs:
+  - job: ReleaseAnalysis
+    displayName: 'Analyze Release Readiness with Copilot'
+    steps:
+    - template: templates/ai-analysis.yml
+      parameters:
+        analysisMode: 'detailed'
+        analysisType: 'release'
+
+- stage: ReportGeneration
+  displayName: '📊 Generate Release Reports'
+  dependsOn: AnalyzeReleaseReadiness
+  jobs:
+  - job: GenerateReports
+    displayName: 'Generate Release Readiness Reports'
+    steps:
+    - template: templates/reporting.yml
+      parameters:
+        reportType: 'executive'
+        includeMetrics: true
+        includeCharts: true

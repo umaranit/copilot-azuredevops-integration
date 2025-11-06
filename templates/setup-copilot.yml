@@ -1,0 +1,69 @@
+# ⚡ Reusable Template: Setup Copilot CLI
+# Install and authenticate GitHub Copilot CLI with retry logic
+
+parameters:
+  - name: nodeVersion
+    type: string
+    default: '22'
+  - name: maxRetries
+    type: number
+    default: 3
+
+steps:
+- script: |
+    echo "🛠️ Setting up GitHub Copilot CLI (Template v1.0)"
+    echo "Node.js Version: ${{ parameters.nodeVersion }}"
+    echo "Max Retries: ${{ parameters.maxRetries }}"
+    
+    # Install Node.js with retry
+    retry_command() {
+      local cmd="$1"
+      local max_attempts=${{ parameters.maxRetries }}
+      local attempt=1
+      
+      while [ $attempt -le $max_attempts ]; do
+        echo "Attempt $attempt/$max_attempts: $cmd"
+        if eval "$cmd"; then
+          echo "✅ Command succeeded"
+          return 0
+        else
+          echo "❌ Command failed"
+          if [ $attempt -eq $max_attempts ]; then
+            return 1
+          fi
+          sleep 5
+          attempt=$((attempt + 1))
+        fi
+      done
+    }
+    
+    # Install prerequisites
+    retry_command "curl -fsSL https://deb.nodesource.com/setup_${{ parameters.nodeVersion }}.x | sudo -E bash -"
+    retry_command "sudo apt-get update && sudo apt-get install -y nodejs jq curl"
+    
+    # Install Copilot CLI
+    retry_command "sudo npm install -g @github/copilot@latest --timeout=60000"
+    
+    # Verify installation
+    which copilot || { echo "❌ Copilot CLI not found"; exit 1; }
+    
+    echo "✅ GitHub Copilot CLI ready"
+    
+  displayName: 'Setup Copilot CLI'
+
+- script: |
+    echo "🔐 Testing Copilot Authentication"
+    export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+    export GH_TOKEN="$(GITHUB_TOKEN)"
+    
+    # Simple authentication test
+    if echo "What is 2+2? Answer with just the number." | timeout 15 copilot > /dev/null 2>&1; then
+      echo "✅ Copilot authentication successful"
+    else
+      echo "❌ Copilot authentication failed"
+      exit 1
+    fi
+    
+  displayName: 'Test Copilot Authentication'
+  env:
+    GITHUB_TOKEN: $(GITHUB_TOKEN)

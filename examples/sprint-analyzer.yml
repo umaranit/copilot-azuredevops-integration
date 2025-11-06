@@ -1,0 +1,86 @@
+# 🚀 Sprint Analyzer - AI-Powered Sprint Readiness Analysis
+# Uses modular templates to analyze sprint readiness of work items
+
+trigger: none
+
+variables:
+  - group: copilot-credentials
+
+parameters:
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'MyProject'
+  - name: sprintName
+    displayName: 'Target Sprint Name'
+    type: string
+    default: 'Sprint 1'
+  - name: analysisDepth
+    displayName: 'Analysis Depth'
+    type: string
+    default: 'standard'
+    values:
+      - basic
+      - standard
+      - detailed
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Setup
+  displayName: '🔧 Setup & Environment'
+  jobs:
+  - job: SetupJob
+    displayName: 'Setup Sprint Analysis Environment'
+    steps:
+    - template: templates/setup-copilot.yml
+      parameters:
+        validateGitHubToken: true
+        installAdditionalTools: true
+
+- stage: FetchSprintData
+  displayName: '📋 Fetch Sprint Work Items'
+  dependsOn: Setup
+  jobs:
+  - job: FetchSprintItems
+    displayName: 'Fetch Sprint Work Items'
+    steps:
+    - template: templates/fetch-workitems.yml
+      parameters:
+        queryType: 'sprint'
+        projectName: '${{ parameters.projectName }}'
+        additionalFilters: 'AND [System.IterationPath] UNDER "\\${{ parameters.projectName }}\\${{ parameters.sprintName }}"'
+        includeFields: 
+          - 'System.Title'
+          - 'System.Description'
+          - 'System.AcceptanceCriteria'
+          - 'System.State'
+          - 'Microsoft.VSTS.Scheduling.StoryPoints'
+          - 'System.AssignedTo'
+        fetchDetails: true
+
+- stage: AnalyzeSprintReadiness
+  displayName: '🤖 AI Sprint Readiness Analysis'
+  dependsOn: FetchSprintData
+  jobs:
+  - job: SprintAnalysis
+    displayName: 'Analyze Sprint Readiness with Copilot'
+    steps:
+    - template: templates/ai-analysis.yml
+      parameters:
+        analysisMode: '${{ parameters.analysisDepth }}'
+        analysisType: 'sprint'
+
+- stage: ReportGeneration
+  displayName: '📊 Generate Sprint Reports'
+  dependsOn: AnalyzeSprintReadiness
+  jobs:
+  - job: GenerateReports
+    displayName: 'Generate Sprint Readiness Reports'
+    steps:
+    - template: templates/reporting.yml
+      parameters:
+        reportType: 'comprehensive'
+        includeMetrics: true
+        includeCharts: false

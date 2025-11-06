@@ -1,0 +1,139 @@
+# ⚡ Reusable Template: Fetch Azure DevOps Data
+# Query and retrieve work items with configurable parameters
+
+parameters:
+  - name: projectName
+    type: string
+  - name: workItemTypes
+    type: string
+    default: 'User Story,Product Backlog Item'
+  - name: maxItems
+    type: number
+    default: 20
+  - name: queryType
+    type: string
+    default: 'backlog'
+    values:
+      - 'backlog'     # Active backlog items
+      - 'sprint'      # Current sprint items  
+      - 'recent'      # Recently updated items
+      - 'custom'      # Custom WIQL query
+  - name: customQuery
+    type: string
+    default: ''
+
+steps:
+- script: |
+    echo "📊 Fetching Azure DevOps Data (Template v1.0)"
+    echo "Project: ${{ parameters.projectName }}"
+    echo "Query Type: ${{ parameters.queryType }}"
+    echo "Max Items: ${{ parameters.maxItems }}"
+    
+    # Build WIQL query based on type
+    case "${{ parameters.queryType }}" in
+      "backlog")
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.State] NOT IN ('Closed', 'Done', 'Removed') ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.CreatedDate] DESC"
+        ;;
+      "sprint")
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.IterationPath] = @currentIteration ORDER BY [System.State] ASC"
+        ;;
+      "recent")
+        WIQL_QUERY="SELECT [System.Id] FROM workitems WHERE [System.WorkItemType] IN ('${{ parameters.workItemTypes }}') AND [System.ChangedDate] >= @today - 30 ORDER BY [System.ChangedDate] DESC"
+        ;;
+      "custom")
+        WIQL_QUERY="${{ parameters.customQuery }}"
+        ;;
+    esac
+    
+    echo "🔍 WIQL Query: $WIQL_QUERY"
+    
+    # API call function with retry
+    call_api_with_retry() {
+      local url="$1"
+      local output_file="$2"
+      local max_attempts=3
+      local attempt=1
+      
+      while [ $attempt -le $max_attempts ]; do
+        echo "📞 API call attempt $attempt/$max_attempts"
+        
+        if curl -s -H "Authorization: Bearer $(System.AccessToken)" \
+           --connect-timeout 30 --max-time 30 "$url" > "$output_file.tmp"; then
+          
+          if jq empty "$output_file.tmp" 2>/dev/null; then
+            mv "$output_file.tmp" "$output_file"
+            echo "✅ API call successful"
+            return 0
+          else
+            echo "❌ Invalid JSON response"
+          fi
+        else
+          echo "❌ API call failed"
+        fi
+        
+        if [ $attempt -eq $max_attempts ]; then
+          echo "💥 All API attempts failed"
+          return 1
+        fi
+        
+        sleep 5
+        attempt=$((attempt + 1))
+      done
+    }
+    
+    # Execute WIQL query
+    PROJECT_NAME_ENCODED="${{ replace(parameters.projectName, ' ', '%20') }}"
+    WIQL_URL="$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/wiql?api-version=7.0"
+    
+    # Create query payload
+    echo "{\"query\": \"$WIQL_QUERY\"}" > query_payload.json
+    
+    if call_api_with_retry "$WIQL_URL" "workitem_ids.json"; then
+      TOTAL_ITEMS=$(cat workitem_ids.json | jq '.workItems | length')
+      echo "📋 Found $TOTAL_ITEMS work items"
+      
+      if [ "$TOTAL_ITEMS" -gt 0 ]; then
+        # Get limited set based on maxItems
+        ITEMS_TO_FETCH=$([ "$TOTAL_ITEMS" -lt ${{ parameters.maxItems }} ] && echo "$TOTAL_ITEMS" || echo "${{ parameters.maxItems }}")
+        IDS=$(cat workitem_ids.json | jq -r ".workItems[:$ITEMS_TO_FETCH] | map(.id) | join(\",\")")
+        
+        # Fetch detailed work items
+        DETAILS_URL="$(System.CollectionUri)${PROJECT_NAME_ENCODED}/_apis/wit/workitems?ids=${IDS}&\$expand=all&api-version=7.0"
+        
+        if call_api_with_retry "$DETAILS_URL" "workitems_detailed.json"; then
+          echo "✅ Successfully fetched $ITEMS_TO_FETCH work items"
+          
+          # Create output directory
+          mkdir -p $(Agent.TempDirectory)/workitems-data
+          cp workitems_detailed.json $(Agent.TempDirectory)/workitems-data/
+          
+          # Create metadata
+          echo "{" > $(Agent.TempDirectory)/workitems-data/metadata.json
+          echo "  \"query_type\": \"${{ parameters.queryType }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+          echo "  \"project\": \"${{ parameters.projectName }}\"," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+          echo "  \"total_available\": $TOTAL_ITEMS," >> $(Agent.TempDirectory)/workitems-data/metadata.json
+          echo "  \"items_fetched\": $ITEMS_TO_FETCH" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+          echo "}" >> $(Agent.TempDirectory)/workitems-data/metadata.json
+          
+        else
+          echo "❌ Failed to fetch work item details"
+          exit 1
+        fi
+      else
+        echo "⚠️ No work items found"
+        echo '{"value": []}' > $(Agent.TempDirectory)/workitems-data/workitems_detailed.json
+      fi
+    else
+      echo "❌ Failed to execute WIQL query"
+      exit 1
+    fi
+    
+  displayName: 'Fetch Work Items'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Work Items Data'
+  inputs:
+    pathToPublish: '$(Agent.TempDirectory)/workitems-data'
+    artifactName: 'workitems-data'

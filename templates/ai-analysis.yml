@@ -1,0 +1,146 @@
+# ⚡ Reusable Template: AI Analysis with Copilot
+# Perform AI analysis on work items with configurable analysis modes
+
+parameters:
+  - name: analysisMode
+    type: string
+    default: 'standard'
+    values:
+      - 'basic'      # Quick quality check
+      - 'standard'   # INVEST analysis
+      - 'detailed'   # Comprehensive analysis
+      - 'governance' # Compliance focus
+  - name: analysisType
+    type: string
+    default: 'backlog'
+    values:
+      - 'backlog'    # Backlog quality analysis
+      - 'sprint'     # Sprint readiness analysis
+      - 'release'    # Release readiness analysis
+      - 'custom'     # Custom analysis
+
+steps:
+- script: |
+    echo "🤖 AI Analysis with Copilot (Template v1.0)"
+    echo "Analysis Mode: ${{ parameters.analysisMode }}"
+    echo "Analysis Type: ${{ parameters.analysisType }}"
+    
+    # Setup Copilot environment
+    export GITHUB_TOKEN="$(GITHUB_TOKEN)"
+    export GH_TOKEN="$(GITHUB_TOKEN)"
+    
+    # Define analysis prompts based on mode and type
+    get_analysis_prompt() {
+      local mode="$1"
+      local type="$2"
+      
+      case "${type}_${mode}" in
+        "backlog_basic")
+          echo "Briefly analyze this work item for quality (1-10 score) and list 2 key issues:"
+          ;;
+        "backlog_standard")
+          echo "Analyze this work item using INVEST principles. Provide: 1) Overall score (1-10), 2) INVEST compliance, 3) Top 3 issues, 4) One key recommendation:"
+          ;;
+        "sprint_standard")
+          echo "Analyze this work item for sprint readiness. Provide: 1) Readiness score (1-10), 2) Definition of Done compliance, 3) Blockers/dependencies, 4) Sprint planning recommendations:"
+          ;;
+        "release_standard")
+          echo "Analyze this work item for release readiness. Provide: 1) Release readiness score (1-10), 2) Quality gates status, 3) Risk assessment, 4) Go/No-go recommendation:"
+          ;;
+        "backlog_detailed")
+          echo "Comprehensive backlog analysis of this work item. Provide: 1) Quality score (1-10), 2) INVEST principle breakdown, 3) Detailed issues list, 4) Specific recommendations, 5) Risk assessment:"
+          ;;
+        *)
+          echo "Analyze this work item and provide improvement recommendations:"
+          ;;
+      esac
+    }
+    
+    ANALYSIS_PROMPT=$(get_analysis_prompt "${{ parameters.analysisMode }}" "${{ parameters.analysisType }}")
+    echo "📝 Using prompt: $ANALYSIS_PROMPT"
+    
+    # Initialize report
+    REPORT_FILE="$(Agent.TempDirectory)/analysis-report.md"
+    echo "# 🤖 AI Analysis Report" > "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "**Analysis Type:** ${{ parameters.analysisType }}" >> "$REPORT_FILE"
+    echo "**Analysis Mode:** ${{ parameters.analysisMode }}" >> "$REPORT_FILE"
+    echo "**Generated:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "---" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    
+    # Process work items
+    WORKITEMS_FILE="$(Agent.TempDirectory)/workitems-data/workitems_detailed.json"
+    
+    if [ -f "$WORKITEMS_FILE" ]; then
+      TOTAL_ITEMS=$(cat "$WORKITEMS_FILE" | jq '.value | length')
+      echo "📊 Processing $TOTAL_ITEMS work items..."
+      
+      PROCESSED=0
+      FAILED=0
+      
+      # Process each work item
+      for i in $(seq 0 $((TOTAL_ITEMS - 1))); do
+        ITEM=$(cat "$WORKITEMS_FILE" | jq ".value[$i]")
+        ID=$(echo "$ITEM" | jq -r '.id')
+        TITLE=$(echo "$ITEM" | jq -r '.fields."System.Title" // "No Title"')
+        TYPE=$(echo "$ITEM" | jq -r '.fields."System.WorkItemType" // "Unknown"')
+        DESCRIPTION=$(echo "$ITEM" | jq -r '.fields."System.Description" // ""')
+        
+        echo "🔍 Analyzing Work Item $ID: $TITLE"
+        
+        # Create analysis input
+        ANALYSIS_INPUT="Work Item ID: $ID
+    Title: $TITLE
+    Type: $TYPE
+    Description: $DESCRIPTION
+    
+    $ANALYSIS_PROMPT"
+        
+        # Perform Copilot analysis with timeout
+        if echo "$ANALYSIS_INPUT" | timeout 60 copilot > "analysis_$ID.md" 2>/dev/null; then
+          echo "✅ Analysis completed for Work Item $ID"
+          
+          # Add to report
+          echo "## 📋 Work Item #$ID: $TITLE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "**Type:** $TYPE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          cat "analysis_$ID.md" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          echo "---" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          
+          PROCESSED=$((PROCESSED + 1))
+        else
+          echo "❌ Analysis failed for Work Item $ID"
+          FAILED=$((FAILED + 1))
+        fi
+        
+        # Rate limiting
+        sleep 2
+      done
+      
+      # Add summary
+      echo "## 📊 Analysis Summary" >> "$REPORT_FILE"
+      echo "" >> "$REPORT_FILE"
+      echo "- **Total Items:** $TOTAL_ITEMS" >> "$REPORT_FILE"
+      echo "- **Successfully Analyzed:** $PROCESSED" >> "$REPORT_FILE"
+      echo "- **Failed:** $FAILED" >> "$REPORT_FILE"
+      echo "" >> "$REPORT_FILE"
+      
+      echo "🎉 Analysis complete: $PROCESSED/$TOTAL_ITEMS items processed"
+    else
+      echo "❌ No work items data found"
+      exit 1
+    fi
+  displayName: 'AI Analysis with Copilot'
+  env:
+    GITHUB_TOKEN: $(GITHUB_TOKEN)
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Analysis Report'
+  inputs:
+    pathToPublish: '$(Agent.TempDirectory)/analysis-report.md'
+    artifactName: 'analysis-report'

@@ -1,0 +1,95 @@
+# 🚀 Backlog Analyzer - AI-Powered Backlog Quality Analysis
+# Uses GitHub Copilot CLI + Azure DevOps integration with modular templates
+
+trigger: none
+
+variables:
+  - group: copilot-credentials
+
+parameters:
+  - name: analyzeTop
+    displayName: 'Number of work items to analyze'
+    type: number
+    default: 10
+    values: [5, 10, 15, 20, 30]
+  
+  - name: analysisMode
+    displayName: 'Analysis Mode'
+    type: string
+    default: 'standard'
+    values: 
+      - 'basic'      # Quick quality check
+      - 'standard'   # Full INVEST analysis
+      - 'detailed'   # Comprehensive with recommendations
+  
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'Parts Unlimited'
+  
+  - name: workItemTypes
+    displayName: 'Work Item Types to Analyze'
+    type: string
+    default: 'User Story,Product Backlog Item'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Setup
+  displayName: '🔧 Setup & Environment'
+  jobs:
+  - job: SetupJob
+    displayName: 'Setup Copilot CLI Environment'
+    steps:
+    - template: templates/setup-copilot.yml
+      parameters:
+        validateGitHubToken: true
+        installAdditionalTools: true
+
+- stage: FetchWorkItems
+  displayName: '📋 Fetch Work Items'
+  dependsOn: Setup
+  jobs:
+  - job: FetchBacklogItems
+    displayName: 'Fetch Backlog Work Items'
+    steps:
+    - template: templates/fetch-workitems.yml
+      parameters:
+        queryType: 'backlog'
+        projectName: '${{ parameters.projectName }}'
+        additionalFilters: 'AND [System.WorkItemType] IN (${{ parameters.workItemTypes }})'
+        includeFields:
+          - 'System.Title'
+          - 'System.Description' 
+          - 'System.AcceptanceCriteria'
+          - 'System.State'
+          - 'Microsoft.VSTS.Common.Priority'
+          - 'Microsoft.VSTS.Scheduling.StoryPoints'
+        fetchDetails: true
+        maxItems: ${{ parameters.analyzeTop }}
+
+- stage: AnalyzeWithCopilot
+  displayName: '🤖 AI Analysis with Copilot'
+  dependsOn: FetchWorkItems
+  jobs:
+  - job: BacklogAnalysis
+    displayName: 'Analyze Backlog Quality with Copilot'
+    steps:
+    - template: templates/ai-analysis.yml
+      parameters:
+        analysisMode: '${{ parameters.analysisMode }}'
+        analysisType: 'backlog'
+
+- stage: ReportGeneration
+  displayName: '📊 Generate Reports'
+  dependsOn: AnalyzeWithCopilot
+  jobs:
+  - job: GenerateReports
+    displayName: 'Generate Analysis Reports'
+    steps:
+    - template: templates/reporting.yml
+      parameters:
+        reportType: 'comprehensive'
+        includeMetrics: true
+        includeCharts: false
